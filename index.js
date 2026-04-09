@@ -120,7 +120,7 @@ async function summarizeChat(jid, msgs) {
 
 // ── Hourly scan ───────────────────────────────────────────────────────────────
 
-async function runScan(sock) {
+async function runScan() {
   const scanStart = new Date();
   const since = lastScanTime;
 
@@ -159,10 +159,10 @@ async function runScan(sock) {
       }
     }
 
-    if (sock?.user) {
+    if (currentSock?.user) {
       try {
-        const selfJid = jidNormalizedUser(sock.user.id);
-        await sock.sendMessage(selfJid, { text: fullReport.trim() });
+        const selfJid = jidNormalizedUser(currentSock.user.id);
+        await currentSock.sendMessage(selfJid, { text: fullReport.trim() });
         if (SHOW_SCAN_LOGS) console.log('✅ Отчёт отправлен в ваш WhatsApp');
       } catch (err) {
         console.error('❌ Ошибка отправки отчёта в WhatsApp:', err);
@@ -188,10 +188,12 @@ async function runScan(sock) {
 // ── Hourly timer ──────────────────────────────────────────────────────────────
 
 let hourlyTimer = null;
+let fallbackTimer = null;
+let currentSock = null;
 
-function scheduleHourlyCheck(sock) {
+function scheduleHourlyCheck() {
   if (hourlyTimer) return; // guard against stacking on reconnect
-  hourlyTimer = setInterval(() => runScan(sock), SCAN_INTERVAL_MS);
+  hourlyTimer = setInterval(() => runScan(), SCAN_INTERVAL_MS);
 }
 
 // ── WhatsApp connection ───────────────────────────────────────────────────────
@@ -208,6 +210,8 @@ async function startWhatsApp() {
     browser: Browsers.macOS('Desktop'),
     getMessage: async () => undefined,
   });
+
+  currentSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -233,7 +237,7 @@ async function startWhatsApp() {
 
       // Fallback: if WA sends no history notification within 35s, scan whatever we have
       // (Baileys AwaitingInitialSync timeout is ~20s, so we wait past it)
-      setTimeout(async () => {
+      fallbackTimer = setTimeout(async () => {
         if (!hourlyTimer) {
           if (SHOW_SCAN_LOGS) {
             console.log(
@@ -241,13 +245,22 @@ async function startWhatsApp() {
             );
           }
 
-          await runScan(sock);
-          scheduleHourlyCheck(sock);
+          await runScan();
+          scheduleHourlyCheck();
         }
       }, 35_000);
     }
 
     if (connection === 'close') {
+      if (hourlyTimer) {
+        clearInterval(hourlyTimer);
+        hourlyTimer = null;
+      }
+      if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      
       const err = lastDisconnect?.error;
       const shouldReconnect =
         err?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -308,8 +321,8 @@ async function startWhatsApp() {
           );
         }
 
-        await runScan(sock);
-        scheduleHourlyCheck(sock);
+        await runScan();
+        scheduleHourlyCheck();
       }
     },
   );
