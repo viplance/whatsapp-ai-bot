@@ -1,0 +1,23 @@
+{
+  "name": "whatsapp-ai-bot",
+  "version": "1.0.0",
+  "description": "WhatsApp message scanner with AI summary",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "baileys",
+      "protobufjs"
+    ]
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.0",
+    "baileys": "7.0.0-rc.9",
+    "dotenv": "^16.5.0",
+    "pino": "^9.7.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
