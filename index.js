@@ -4,6 +4,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   Browsers,
   fetchLatestWaWebVersion,
+  jidNormalizedUser,
 } from 'baileys';
 import qrcode from 'qrcode-terminal';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -119,7 +120,7 @@ async function summarizeChat(jid, msgs) {
 
 // ── Hourly scan ───────────────────────────────────────────────────────────────
 
-async function runScan() {
+async function runScan(sock) {
   const scanStart = new Date();
   const since = lastScanTime;
 
@@ -139,14 +140,32 @@ async function runScan() {
   }
 
   if (Object.keys(chatsToSummarize).length === 0) {
-    console.log('  Нет новых сообщений за этот период.');
+    if (SHOW_SCAN_LOGS) console.log('  Нет новых сообщений за этот период.');
   } else {
-    if (SHOW_SCAN_LOGS) {
-      for (const [jid, msgs] of Object.entries(chatsToSummarize)) {
-        console.log(`\n📌 ${chatLabel(jid)} (${msgs.length} сообщ.)`);
+    let fullReport = `📝 *ОТЧЁТ ПО ЧАТАМ*\n_${since.toLocaleTimeString('ru-RU')} — ${scanStart.toLocaleTimeString('ru-RU')}_\n\n`;
+    let count = 0;
+
+    for (const [jid, msgs] of Object.entries(chatsToSummarize)) {
+      const summary = await summarizeChat(jid, msgs);
+      const label = chatLabel(jid);
+
+      fullReport += `📌 *${label}* (${msgs.length})\n${summary}\n\n`;
+      count++;
+
+      if (SHOW_SCAN_LOGS) {
+        console.log(`\n📌 ${label} (${msgs.length} сообщ.)`);
         console.log('─'.repeat(50));
-        const summary = await summarizeChat(jid, msgs);
         console.log(summary);
+      }
+    }
+
+    if (sock?.user) {
+      try {
+        const selfJid = jidNormalizedUser(sock.user.id);
+        await sock.sendMessage(selfJid, { text: fullReport.trim() });
+        if (SHOW_SCAN_LOGS) console.log('✅ Отчёт отправлен в ваш WhatsApp');
+      } catch (err) {
+        console.error('❌ Ошибка отправки отчёта в WhatsApp:', err);
       }
     }
   }
@@ -170,9 +189,9 @@ async function runScan() {
 
 let hourlyTimer = null;
 
-function scheduleHourlyCheck() {
+function scheduleHourlyCheck(sock) {
   if (hourlyTimer) return; // guard against stacking on reconnect
-  hourlyTimer = setInterval(runScan, SCAN_INTERVAL_MS);
+  hourlyTimer = setInterval(() => runScan(sock), SCAN_INTERVAL_MS);
 }
 
 // ── WhatsApp connection ───────────────────────────────────────────────────────
@@ -222,8 +241,8 @@ async function startWhatsApp() {
             );
           }
 
-          await runScan();
-          scheduleHourlyCheck();
+          await runScan(sock);
+          scheduleHourlyCheck(sock);
         }
       }, 35_000);
     }
@@ -289,8 +308,8 @@ async function startWhatsApp() {
           );
         }
 
-        await runScan();
-        scheduleHourlyCheck();
+        await runScan(sock);
+        scheduleHourlyCheck(sock);
       }
     },
   );
