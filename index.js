@@ -91,15 +91,38 @@ function extractText(msg) {
   );
 }
 
-function chatLabel(jid) {
-  return jid.endsWith('@g.us')
-    ? `Группа ${jid.split('@')[0]}`
-    : `Личный чат ${jid.split('@')[0]}`;
+const groupNamesCache = {};
+const contactNamesCache = {};
+
+async function chatLabel(jid) {
+  if (jid.endsWith('@g.us')) {
+    if (groupNamesCache[jid]) return `Группа "${groupNamesCache[jid]}"`;
+
+    if (currentSock) {
+      try {
+        const metadata = await currentSock.groupMetadata(jid);
+
+        if (metadata && metadata.subject) {
+          groupNamesCache[jid] = metadata.subject;
+          return `Группа "${metadata.subject}"`;
+        }
+      } catch (err) {
+        // Fallback on error
+      }
+    }
+    return `Группа ${jid.split('@')[0]}`;
+  }
+
+  if (contactNamesCache[jid]) {
+    return `Личный чат "${contactNamesCache[jid]}"`;
+  }
+
+  return `Личный чат ${jid.split('@')[0]}`;
 }
 
 // ── Per-chat summary ──────────────────────────────────────────────────────────
 
-async function summarizeChat(jid, msgs) {
+async function summarizeChat(jid, msgs, label) {
   const lines = msgs.map((m) => {
     const hhmm = m.time.toLocaleTimeString('ru-RU', {
       hour: '2-digit',
@@ -108,7 +131,7 @@ async function summarizeChat(jid, msgs) {
     return `[${hhmm}] ${m.sender}: ${m.text}`;
   });
 
-  const prompt = `Чат: ${chatLabel(jid)}\n\nСообщения:\n${lines.join('\n')}`;
+  const prompt = `Чат: ${label}\n\nСообщения:\n${lines.join('\n')}`;
 
   try {
     const result = await geminiModel.generateContent(prompt);
@@ -146,8 +169,8 @@ async function runScan() {
     let count = 0;
 
     for (const [jid, msgs] of Object.entries(chatsToSummarize)) {
-      const summary = await summarizeChat(jid, msgs);
-      const label = chatLabel(jid);
+      const label = await chatLabel(jid);
+      const summary = await summarizeChat(jid, msgs, label);
 
       fullReport += `📌 *${label}* (${msgs.length})\n${summary}\n\n`;
       count++;
@@ -256,11 +279,12 @@ async function startWhatsApp() {
         clearInterval(hourlyTimer);
         hourlyTimer = null;
       }
+
       if (fallbackTimer) {
         clearTimeout(fallbackTimer);
         fallbackTimer = null;
       }
-      
+
       const err = lastDisconnect?.error;
       const shouldReconnect =
         err?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -306,6 +330,10 @@ async function startWhatsApp() {
           ? msg.key.participant || msg.pushName || 'Unknown'
           : msg.pushName || jid.split('@')[0];
 
+        if (!isGroup && !msg.key.fromMe && msg.pushName) {
+          contactNamesCache[jid] = msg.pushName;
+        }
+
         storeMessage(jid, sender, text, time);
         stored++;
       }
@@ -339,6 +367,10 @@ async function startWhatsApp() {
       const sender = isGroup
         ? msg.key.participant || msg.pushName || 'Unknown'
         : msg.pushName || jid.split('@')[0];
+
+      if (!isGroup && !msg.key.fromMe && msg.pushName) {
+        contactNamesCache[jid] = msg.pushName;
+      }
 
       // Use message timestamp from WA if available, else now
       const time = msg.messageTimestamp
