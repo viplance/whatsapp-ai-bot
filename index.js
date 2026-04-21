@@ -122,7 +122,7 @@ async function chatLabel(jid) {
 
 // ── Per-chat summary ──────────────────────────────────────────────────────────
 
-async function summarizeChat(jid, msgs, label) {
+async function summarizeChat(jid, msgs, label, retries = 3) {
   const lines = msgs.map((m) => {
     const hhmm = m.time.toLocaleTimeString('ru-RU', {
       hour: '2-digit',
@@ -133,12 +133,22 @@ async function summarizeChat(jid, msgs, label) {
 
   const prompt = `Чат: ${label}\n\nСообщения:\n${lines.join('\n')}`;
 
-  try {
-    const result = await geminiModel.generateContent(prompt);
-    return result.response.text().trim();
-  } catch (err) {
-    return `[Ошибка Gemini: ${err.message}]`;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await geminiModel.generateContent(prompt);
+      return result.response.text().trim();
+    } catch (err) {
+      console.error(
+        `❌ Ошибка Gemini для чата ${label} (попытка ${attempt}/${retries}):`,
+        err.message,
+      );
+
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 5000));
+      }
+    }
   }
+  return null;
 }
 
 // ── Hourly scan ───────────────────────────────────────────────────────────────
@@ -172,17 +182,19 @@ async function runScan() {
       const label = await chatLabel(jid);
       const summary = await summarizeChat(jid, msgs, label);
 
-      fullReport += `📌 *${label}* (${msgs.length})\n${summary}\n\n`;
-      count++;
+      if (summary) {
+        fullReport += `📌 *${label}* (${msgs.length})\n${summary}\n\n`;
+        count++;
 
-      if (SHOW_SCAN_LOGS) {
-        console.log(`\n📌 ${label} (${msgs.length} сообщ.)`);
-        console.log('─'.repeat(50));
-        console.log(summary);
+        if (SHOW_SCAN_LOGS) {
+          console.log(`\n📌 ${label} (${msgs.length} сообщ.)`);
+          console.log('─'.repeat(50));
+          console.log(summary);
+        }
       }
     }
 
-    if (currentSock?.user) {
+    if (currentSock?.user && count > 0) {
       try {
         const selfJid = jidNormalizedUser(currentSock.user.id);
         await currentSock.sendMessage(selfJid, { text: fullReport.trim() });
