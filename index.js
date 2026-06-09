@@ -243,6 +243,10 @@ async function startWhatsApp() {
     auth: state,
     logger,
     browser: Browsers.macOS('Desktop'),
+    syncFullHistory: true,
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 60_000,
+    keepAliveIntervalMs: 30_000,
     getMessage: async () => undefined,
   });
 
@@ -270,8 +274,7 @@ async function startWhatsApp() {
       );
       console.log(`   Ожидаю синхронизацию истории...\n`);
 
-      // Fallback: if WA sends no history notification within 35s, scan whatever we have
-      // (Baileys AwaitingInitialSync timeout is ~20s, so we wait past it)
+      // Fallback: if WA sends no history notification within 75s, scan whatever we have
       fallbackTimer = setTimeout(async () => {
         if (!hourlyTimer) {
           if (SHOW_SCAN_LOGS) {
@@ -283,7 +286,7 @@ async function startWhatsApp() {
           await runScan();
           scheduleHourlyCheck();
         }
-      }, 35_000);
+      }, 75_000);
     }
 
     if (connection === 'close') {
