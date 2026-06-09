@@ -10,9 +10,11 @@ import { config, AUTH_FOLDER } from './config.js';
 import {
   storeMessage,
   rememberContactName,
+  resolveGroupName,
   extractText,
 } from './store.js';
 import { runScan, getLastScanTime } from './scanner.js';
+import { matchesFilters, filtersActive } from './filters.js';
 
 let hourlyTimer = null;
 let fallbackTimer = null;
@@ -43,6 +45,18 @@ function resolveSender(msg, jid, isGroup) {
     rememberContactName(jid, msg.pushName);
   }
   return sender;
+}
+
+/**
+ * Whether a message should be processed given config.filters. Matches the
+ * filter terms against the group/channel name (for groups) and the sender name.
+ * No filters configured → everything passes.
+ */
+async function passesFilters(jid, isGroup, sender, sock) {
+  if (!filtersActive) return true;
+
+  const groupName = isGroup ? await resolveGroupName(jid, sock) : null;
+  return matchesFilters(groupName, sender);
 }
 
 export async function startWhatsApp() {
@@ -135,6 +149,8 @@ export async function startWhatsApp() {
       const isGroup = jid.endsWith('@g.us');
       const sender = resolveSender(msg, jid, isGroup);
 
+      if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
+
       storeMessage(jid, sender, text, time);
       stored++;
     }
@@ -152,7 +168,7 @@ export async function startWhatsApp() {
     }
   });
 
-  sock.ev.on('messages.upsert', (m) => {
+  sock.ev.on('messages.upsert', async (m) => {
     if (m.type !== 'notify') return;
 
     for (const msg of m.messages) {
@@ -162,6 +178,8 @@ export async function startWhatsApp() {
       const jid = msg.key.remoteJid;
       const isGroup = jid.endsWith('@g.us');
       const sender = resolveSender(msg, jid, isGroup);
+
+      if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
 
       // Use message timestamp from WA if available, else now.
       const time = msg.messageTimestamp

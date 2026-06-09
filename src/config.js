@@ -14,6 +14,7 @@ export const STATE_FILE = join(ROOT, 'scan-state.json');
 const DEFAULTS = {
   period: '60min',
   waitForNoActivity: '0',
+  filters: [],
   phones: ['own'],
   model: 'gemini-2.0-flash',
   showScanLogs: true,
@@ -73,6 +74,7 @@ function buildConfig() {
     scanIntervalMs: parsePeriodMs(merged.period),
     waitForNoActivity: merged.waitForNoActivity,
     waitForNoActivityMs: parsePeriodMs(merged.waitForNoActivity),
+    filters: Array.isArray(merged.filters) ? merged.filters : [],
     phones: Array.isArray(merged.phones) ? merged.phones : [merged.phones],
     showScanLogs: merged.showScanLogs !== false,
     defaultLookbackMs: merged.defaultLookbackHours * 60 * 60 * 1000,

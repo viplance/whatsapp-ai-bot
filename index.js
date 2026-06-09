@@ -8,6 +8,9 @@ console.log(`   Интервал:  ${config.period}`);
 console.log(`   Тишина:    ${config.waitForNoActivity}`);
 console.log(`   Получатели: ${config.phones.join(', ')}`);
 console.log(
+  `   Фильтры:   ${config.filters.length ? config.filters.join(', ') : '(нет — все чаты)'}`,
+);
+console.log(
   `   Последнее сканирование: ${getLastScanTime().toLocaleString('ru-RU')}\n`,
 );
 

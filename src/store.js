@@ -16,6 +16,26 @@ export function rememberContactName(jid, name) {
   if (name) contactNamesCache[jid] = name;
 }
 
+/**
+ * Return a group's subject, resolving via the socket and caching it. Groups
+ * whose metadata can't be fetched fall back to null (caller decides what to do).
+ */
+export async function resolveGroupName(jid, sock) {
+  if (groupNamesCache[jid]) return groupNamesCache[jid];
+  if (!sock) return null;
+
+  try {
+    const metadata = await sock.groupMetadata(jid);
+    if (metadata?.subject) {
+      groupNamesCache[jid] = metadata.subject;
+      return metadata.subject;
+    }
+  } catch {
+    // ignore — name stays unresolved
+  }
+  return null;
+}
+
 export function extractText(msg) {
   return (
     msg.message?.conversation ||
@@ -28,20 +48,8 @@ export function extractText(msg) {
 
 export async function chatLabel(jid, sock) {
   if (jid.endsWith('@g.us')) {
-    if (groupNamesCache[jid]) return `Группа "${groupNamesCache[jid]}"`;
-
-    if (sock) {
-      try {
-        const metadata = await sock.groupMetadata(jid);
-        if (metadata?.subject) {
-          groupNamesCache[jid] = metadata.subject;
-          return `Группа "${metadata.subject}"`;
-        }
-      } catch {
-        // Fallback on error
-      }
-    }
-    return `Группа ${jid.split('@')[0]}`;
+    const name = await resolveGroupName(jid, sock);
+    return name ? `Группа "${name}"` : `Группа ${jid.split('@')[0]}`;
   }
 
   if (contactNamesCache[jid]) {

@@ -1,6 +1,7 @@
 {
   "period": "10min",
   "waitForNoActivity": "15min",
+  "filters": ["school", "John"],
   "phones": ["own"],
   "model": "gemini-2.0-flash",
   "showScanLogs": true,
