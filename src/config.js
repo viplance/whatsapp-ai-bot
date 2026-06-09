@@ -13,6 +13,7 @@ export const STATE_FILE = join(ROOT, 'scan-state.json');
 // Defaults applied when config.json omits a field.
 const DEFAULTS = {
   period: '60min',
+  waitForNoActivity: '0',
   phones: ['own'],
   model: 'gemini-2.0-flash',
   showScanLogs: true,
@@ -70,6 +71,8 @@ function buildConfig() {
     systemInstruction: merged.systemInstruction,
     period: merged.period,
     scanIntervalMs: parsePeriodMs(merged.period),
+    waitForNoActivity: merged.waitForNoActivity,
+    waitForNoActivityMs: parsePeriodMs(merged.waitForNoActivity),
     phones: Array.isArray(merged.phones) ? merged.phones : [merged.phones],
     showScanLogs: merged.showScanLogs !== false,
     defaultLookbackMs: merged.defaultLookbackHours * 60 * 60 * 1000,

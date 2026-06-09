@@ -50,11 +50,3 @@ export async function chatLabel(jid, sock) {
 
   return `Личный чат ${jid.split('@')[0]}`;
 }
-
-/** Drop messages at or before `cutoff` to keep memory bounded. */
-export function pruneMessages(cutoff) {
-  for (const jid of Object.keys(messages)) {
-    messages[jid] = messages[jid].filter((m) => m.time > cutoff);
-    if (messages[jid].length === 0) delete messages[jid];
-  }
-}

@@ -1,6 +1,6 @@
 import { jidNormalizedUser } from 'baileys';
 import { config } from './config.js';
-import { messages, chatLabel, pruneMessages } from './store.js';
+import { messages, chatLabel } from './store.js';
 import { summarizeChat } from './gemini.js';
 import { loadLastScanTime, saveLastScanTime } from './state.js';
 
@@ -37,15 +37,36 @@ export async function runScan(sock) {
     console.log(`${'═'.repeat(60)}`);
   }
 
-  // Collect messages received since last scan.
+  // Collect messages received since last scan, splitting chats into:
+  //  - quiet: last message older than waitForNoActivity → ready to report
+  //  - active: a message arrived within waitForNoActivity → skip, keep for later
+  const quietGate = config.waitForNoActivityMs;
+  const quietCutoff = scanStart.getTime() - quietGate;
+
   const chatsToSummarize = {};
+  const skippedJids = [];
   for (const [jid, msgs] of Object.entries(messages)) {
     const slice = msgs.filter((m) => m.time > since && m.time <= scanStart);
-    if (slice.length > 0) chatsToSummarize[jid] = slice;
+    if (slice.length === 0) continue;
+
+    const lastMsgTime = slice[slice.length - 1].time.getTime();
+    const isActive = quietGate > 0 && lastMsgTime > quietCutoff;
+
+    if (isActive) {
+      skippedJids.push(jid);
+    } else {
+      chatsToSummarize[jid] = slice;
+    }
+  }
+
+  if (skippedJids.length > 0 && showScanLogs) {
+    console.log(
+      `  ⏸ Пропущено активных чатов (нет тишины ${config.waitForNoActivity}): ${skippedJids.length}`,
+    );
   }
 
   if (Object.keys(chatsToSummarize).length === 0) {
-    if (showScanLogs) console.log('  Нет новых сообщений за этот период.');
+    if (showScanLogs) console.log('  Нет чатов, готовых к отчёту за этот период.');
   } else {
     let fullReport = `📝 *ОТЧЁТ ПО ЧАТАМ*\n_${since.toLocaleTimeString('ru-RU')} — ${scanStart.toLocaleTimeString('ru-RU')}_\n\n`;
     let count = 0;
@@ -67,22 +88,56 @@ export async function runScan(sock) {
     }
 
     const recipients = reportRecipientJids(sock);
+    let sent = false;
     if (count > 0) {
+      sent = true;
       for (const recipient of recipients) {
         try {
           await sock.sendMessage(recipient, { text: fullReport.trim() });
           if (showScanLogs) console.log(`✅ Отчёт отправлен в WhatsApp: ${recipient}`);
         } catch (err) {
           console.error(`❌ Ошибка отправки отчёта (${recipient}):`, err);
+          sent = false;
         }
+      }
+    }
+
+    // Drop the messages we successfully reported so they aren't reported again.
+    // Skipped (active) chats are left untouched and roll into a later report.
+    if (sent) {
+      for (const jid of Object.keys(chatsToSummarize)) {
+        dropReported(jid, scanStart, since);
       }
     }
   }
 
   if (showScanLogs) console.log(`\n${'═'.repeat(60)}\n`);
 
-  // Advance the scan window, persist, and drop now-stale messages.
-  lastScanTime = scanStart;
+  // Advance the cursor to the oldest message still held (skipped/unsent chats),
+  // so next tick's `since` filter re-includes them; empty store → scanStart.
+  lastScanTime = oldestRemaining(since) ?? scanStart;
   saveLastScanTime(lastScanTime);
-  pruneMessages(lastScanTime);
+}
+
+/** Remove messages in (since, scanStart] for a reported chat; clean up empties. */
+function dropReported(jid, scanStart, since) {
+  if (!messages[jid]) return;
+  messages[jid] = messages[jid].filter(
+    (m) => !(m.time > since && m.time <= scanStart),
+  );
+  if (messages[jid].length === 0) delete messages[jid];
+}
+
+/**
+ * The oldest remaining message time across all chats, minus 1ms so it stays
+ * strictly greater than the cursor on the next `since` filter. Null if empty.
+ */
+function oldestRemaining(since) {
+  let oldest = null;
+  for (const msgs of Object.values(messages)) {
+    for (const m of msgs) {
+      if (m.time > since && (oldest === null || m.time < oldest)) oldest = m.time;
+    }
+  }
+  return oldest ? new Date(oldest.getTime() - 1) : null;
 }
