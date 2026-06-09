@@ -1,4 +1,5 @@
 /auth_info_baileys
 /node_modules
 .env
+config.json
 scan-state.json
