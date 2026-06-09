@@ -10,17 +10,18 @@ export function getLastScanTime() {
   return lastScanTime;
 }
 
-/** Resolve the JID reports are sent to, based on config.phone. */
-function reportRecipientJid(sock) {
-  if (!sock?.user) return null;
+/** Resolve the JIDs reports are sent to, based on config.phones. */
+function reportRecipientJids(sock) {
+  if (!sock?.user) return [];
 
-  if (config.phone === 'own' || !config.phone) {
-    return jidNormalizedUser(sock.user.id);
-  }
-
-  // A phone number: strip non-digits and build a WhatsApp JID.
-  const digits = String(config.phone).replace(/\D/g, '');
-  return `${digits}@s.whatsapp.net`;
+  return config.phones.map((phone) => {
+    if (phone === 'own' || !phone) {
+      return jidNormalizedUser(sock.user.id);
+    }
+    // A phone number: strip non-digits and build a WhatsApp JID.
+    const digits = String(phone).replace(/\D/g, '');
+    return `${digits}@s.whatsapp.net`;
+  });
 }
 
 export async function runScan(sock) {
@@ -65,13 +66,15 @@ export async function runScan(sock) {
       }
     }
 
-    const recipient = reportRecipientJid(sock);
-    if (recipient && count > 0) {
-      try {
-        await sock.sendMessage(recipient, { text: fullReport.trim() });
-        if (showScanLogs) console.log('✅ Отчёт отправлен в WhatsApp');
-      } catch (err) {
-        console.error('❌ Ошибка отправки отчёта в WhatsApp:', err);
+    const recipients = reportRecipientJids(sock);
+    if (count > 0) {
+      for (const recipient of recipients) {
+        try {
+          await sock.sendMessage(recipient, { text: fullReport.trim() });
+          if (showScanLogs) console.log(`✅ Отчёт отправлен в WhatsApp: ${recipient}`);
+        } catch (err) {
+          console.error(`❌ Ошибка отправки отчёта (${recipient}):`, err);
+        }
       }
     }
   }

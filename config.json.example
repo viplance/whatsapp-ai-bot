@@ -1,6 +1,6 @@
 {
   "period": "10min",
-  "phone": "own",
+  "phones": ["own"],
   "model": "gemini-2.0-flash",
   "showScanLogs": true,
   "defaultLookbackHours": 24,
