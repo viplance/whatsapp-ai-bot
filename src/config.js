@@ -16,7 +16,7 @@ const DEFAULTS = {
   waitForNoActivity: '0',
   filters: [],
   phones: ['own'],
-  model: 'gemini-2.0-flash',
+  model: 'gemini-2.5-flash',
   showScanLogs: true,
   defaultLookbackHours: 24,
   systemInstruction: '',
