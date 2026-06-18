@@ -10,6 +10,7 @@ import { config, AUTH_FOLDER } from './config.js';
 import {
   storeMessage,
   rememberContactName,
+  rememberContact,
   resolveGroupName,
   extractText,
 } from './store.js';
@@ -78,6 +79,11 @@ export async function startWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds);
 
+  // Learn contact display names from the WA contacts list so reports can label
+  // personal chats by name even when no incoming message carried a pushName.
+  sock.ev.on('contacts.upsert', (contacts) => contacts.forEach(rememberContact));
+  sock.ev.on('contacts.update', (contacts) => contacts.forEach(rememberContact));
+
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
@@ -129,44 +135,49 @@ export async function startWhatsApp() {
   });
 
   // History sync — fires one or more times after connect; isLatest=true on the final batch.
-  sock.ev.on('messaging-history.set', async ({ messages: histMsgs, isLatest }) => {
-    let stored = 0;
+  sock.ev.on(
+    'messaging-history.set',
+    async ({ messages: histMsgs, contacts: histContacts, isLatest }) => {
+      for (const contact of histContacts || []) rememberContact(contact);
 
-    for (const msg of histMsgs || []) {
-      const text = extractText(msg);
-      if (!text) continue;
+      let stored = 0;
 
-      const time = msg.messageTimestamp
-        ? new Date(Number(msg.messageTimestamp) * 1000)
-        : null;
+      for (const msg of histMsgs || []) {
+        const text = extractText(msg);
+        if (!text) continue;
 
-      // Only keep messages within the scan window.
-      if (!time || time <= getLastScanTime()) continue;
+        const time = msg.messageTimestamp
+          ? new Date(Number(msg.messageTimestamp) * 1000)
+          : null;
 
-      const jid = msg.key?.remoteJid;
-      if (!jid) continue;
+        // Only keep messages within the scan window.
+        if (!time || time <= getLastScanTime()) continue;
 
-      const isGroup = jid.endsWith('@g.us');
-      const sender = resolveSender(msg, jid, isGroup);
+        const jid = msg.key?.remoteJid;
+        if (!jid) continue;
 
-      if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
+        const isGroup = jid.endsWith('@g.us');
+        const sender = resolveSender(msg, jid, isGroup);
 
-      storeMessage(jid, sender, text, time);
-      stored++;
-    }
+        if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
 
-    if (stored > 0 && config.showScanLogs) {
-      console.log(`📥 История: получено ${stored} сообщений`);
-    }
-
-    if (isLatest) {
-      if (config.showScanLogs) {
-        console.log('✅ Синхронизация истории завершена. Запускаю сканирование...\n');
+        storeMessage(jid, sender, text, time);
+        stored++;
       }
-      await runScan(sock);
-      scheduleHourlyCheck(sock);
-    }
-  });
+
+      if (stored > 0 && config.showScanLogs) {
+        console.log(`📥 История: получено ${stored} сообщений`);
+      }
+
+      if (isLatest) {
+        if (config.showScanLogs) {
+          console.log('✅ Синхронизация истории завершена. Запускаю сканирование...\n');
+        }
+        await runScan(sock);
+        scheduleHourlyCheck(sock);
+      }
+    },
+  );
 
   sock.ev.on('messages.upsert', async (m) => {
     if (m.type !== 'notify') return;

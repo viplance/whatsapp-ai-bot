@@ -10,6 +10,11 @@ export function getLastScanTime() {
   return lastScanTime;
 }
 
+export function overrideLastScanTime(date) {
+  lastScanTime = date;
+  saveLastScanTime(date);
+}
+
 /** Resolve the JIDs reports are sent to, based on config.phones. */
 function reportRecipientJids(sock) {
   if (!sock?.user) return [];

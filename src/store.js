@@ -17,6 +17,22 @@ export function rememberContactName(jid, name) {
 }
 
 /**
+ * Cache the display name for a contact from the WA contacts list. Prefers the
+ * name saved in your address book, then the contact's own pushName/notify.
+ * Indexes under both the primary id and any phone-number JID so lookups by
+ * either form resolve.
+ */
+export function rememberContact(contact) {
+  if (!contact) return;
+  const name = contact.name || contact.notify || contact.verifiedName;
+  if (!name) return;
+
+  for (const id of [contact.id, contact.phoneNumber]) {
+    if (id) contactNamesCache[id] = name;
+  }
+}
+
+/**
  * Return a group's subject, resolving via the socket and caching it. Groups
  * whose metadata can't be fetched fall back to null (caller decides what to do).
  */

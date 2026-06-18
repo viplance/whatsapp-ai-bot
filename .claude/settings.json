@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(tmux new-session *)",
+      "Bash(tmux send-keys *)"
+    ]
+  }
+}
