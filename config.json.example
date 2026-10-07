@@ -3,7 +3,8 @@
   "waitForNoActivity": "15min",
   "filters": ["school", "John"],
   "phones": ["own"],
-  "model": "gemini-2.0-flash",
+  "model": "gemini-2.5-flash",
+  "summaryConcurrency": 2,
   "showScanLogs": true,
   "defaultLookbackHours": 24,
   "systemInstruction": "Ты — помощник, который делает краткое резюме переписки в WhatsApp для одного чата.\nПолучишь список сообщений в формате:\n[HH:MM] ОТПРАВИТЕЛЬ: текст\n\nТвоя задача:\n1. Кратко изложить главные темы и события на русском языке.\n2. Перевести иностранные фразы на русский.\n3. Вернуть читаемый короткий отчёт на русском языке (3–7 предложений)."

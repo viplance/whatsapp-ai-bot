@@ -1,148 +1,116 @@
-import { jidNormalizedUser } from 'baileys';
-import { config } from './config.js';
-import { messages, chatLabel } from './store.js';
-import { summarizeChat } from './gemini.js';
-import { loadLastScanTime, saveLastScanTime } from './state.js';
+import { randomUUID } from 'node:crypto';
+import { splitText } from './text.js';
 
-let lastScanTime = loadLastScanTime();
+export const REPORT_HEADER = '📝 *ОТЧЁТ ПО ЧАТАМ*';
+const MAX_REPORT_CHARS = 3500;
+const MAX_BATCH_CHARS = 24_000;
 
-export function getLastScanTime() {
-  return lastScanTime;
-}
+export function createScanner({ config, store, summarizeChat, chatLabel, normalizeJid, now = () => new Date(), logger = console }) {
+  let inFlight, activeSocket;
+  const check = (signal) => signal?.throwIfAborted();
 
-export function overrideLastScanTime(date) {
-  lastScanTime = date;
-  saveLastScanTime(date);
-}
-
-/** Resolve the JIDs reports are sent to, based on config.phones. */
-function reportRecipientJids(sock) {
-  if (!sock?.user) return [];
-
-  return config.phones.map((phone) => {
-    if (phone === 'own' || !phone) {
-      return jidNormalizedUser(sock.user.id);
-    }
-    // A phone number: strip non-digits and build a WhatsApp JID.
-    const digits = String(phone).replace(/\D/g, '');
-    return `${digits}@s.whatsapp.net`;
-  });
-}
-
-export async function runScan(sock) {
-  const { showScanLogs } = config;
-  const scanStart = new Date();
-  const since = lastScanTime;
-
-  if (showScanLogs) {
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log(
-      `🔍 Сканирование: ${since.toLocaleString('ru-RU')} → ${scanStart.toLocaleString('ru-RU')}`,
-    );
-    console.log(`${'═'.repeat(60)}`);
-  }
-
-  // Collect messages received since last scan, splitting chats into:
-  //  - quiet: last message older than waitForNoActivity → ready to report
-  //  - active: a message arrived within waitForNoActivity → skip, keep for later
-  const quietGate = config.waitForNoActivityMs;
-  const quietCutoff = scanStart.getTime() - quietGate;
-
-  const chatsToSummarize = {};
-  const skippedJids = [];
-  for (const [jid, msgs] of Object.entries(messages)) {
-    const slice = msgs.filter((m) => m.time > since && m.time <= scanStart);
-    if (slice.length === 0) continue;
-
-    const lastMsgTime = slice[slice.length - 1].time.getTime();
-    const isActive = quietGate > 0 && lastMsgTime > quietCutoff;
-
-    if (isActive) {
-      skippedJids.push(jid);
-    } else {
-      chatsToSummarize[jid] = slice;
-    }
-  }
-
-  if (skippedJids.length > 0 && showScanLogs) {
-    console.log(
-      `  ⏸ Пропущено активных чатов (нет тишины ${config.waitForNoActivity}): ${skippedJids.length}`,
-    );
-  }
-
-  if (Object.keys(chatsToSummarize).length === 0) {
-    if (showScanLogs) console.log('  Нет чатов, готовых к отчёту за этот период.');
-  } else {
-    let fullReport = `📝 *ОТЧЁТ ПО ЧАТАМ*\n_${since.toLocaleTimeString('ru-RU')} — ${scanStart.toLocaleTimeString('ru-RU')}_\n\n`;
-    let count = 0;
-
-    for (const [jid, msgs] of Object.entries(chatsToSummarize)) {
-      const label = await chatLabel(jid, sock);
-      const summary = await summarizeChat(msgs, label);
-
-      if (summary) {
-        fullReport += `📌 *${label}* (${msgs.length})\n${summary}\n\n`;
-        count++;
-
-        if (showScanLogs) {
-          console.log(`\n📌 ${label} (${msgs.length} сообщ.)`);
-          console.log('─'.repeat(50));
-          console.log(summary);
+  async function deliver(sock, signal, reportId) {
+    for (const report of store.reports()) {
+      if (reportId && report.id !== reportId) continue;
+      for (const recipient of report.recipients) {
+        for (let part = recipient.nextPart; part < report.parts.length; part++) {
+          check(signal);
+          try {
+            await sock.sendMessage(recipient.jid, { text: report.parts[part] });
+          } catch (err) {
+            check(signal);
+            logger.error(`❌ Ошибка отправки отчёта (${recipient.jid}):`, err.message);
+            break;
+          }
+          // Persist even if a disconnect occurred while sendMessage completed.
+          store.recordDelivery(report.id, recipient.jid, part + 1);
+          recipient.nextPart = part + 1;
+          if (config.showScanLogs) logger.log(`✅ Отчёт отправлен: ${recipient.jid} (${part + 1}/${report.parts.length})`);
         }
       }
+      if (report.recipients.every((r) => r.nextPart === report.parts.length)) store.acknowledgeReport(report.id);
     }
+  }
 
-    const recipients = reportRecipientJids(sock);
-    let sent = false;
-    if (count > 0) {
-      sent = true;
-      for (const recipient of recipients) {
+  async function scan(sock, { signal } = {}) {
+    check(signal);
+    if (!sock?.user) throw new Error('Cannot scan without a connected WhatsApp user');
+    const recipients = [...new Set(config.phones.map((phone) => phone === 'own'
+      ? normalizeJid(sock.user.id) : `${phone}@s.whatsapp.net`))];
+    if (!recipients.length || recipients.some((jid) => !jid)) throw new Error('No valid report recipients');
+    const scanStart = now();
+    await deliver(sock, signal);
+    const reserved = new Set(store.reports().flatMap((r) => r.messageIds));
+    const chats = new Map();
+    for (const msg of store.messages()) {
+      if (!chats.has(msg.jid)) chats.set(msg.jid, []);
+      chats.get(msg.jid).push(msg);
+    }
+    const batches = [];
+    for (const [jid, messages] of chats) {
+      messages.sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+      const latest = messages[messages.length - 1].time;
+      if (config.waitForNoActivityMs > 0 && scanStart - latest < config.waitForNoActivityMs) continue;
+      let size = 0;
+      const batch = [];
+      for (const msg of messages) {
+        if (reserved.has(msg.id) || msg.time > scanStart) continue;
+        if (batch.length && size + msg.text.length > MAX_BATCH_CHARS) break;
+        batch.push(msg);
+        size += msg.text.length;
+      }
+      if (batch.length) batches.push({ jid, messages: batch });
+    }
+    const results = new Array(batches.length);
+    let next = 0;
+    async function worker() {
+      while (next < batches.length) {
+        check(signal);
+        const index = next++;
+        const batch = batches[index];
         try {
-          await sock.sendMessage(recipient, { text: fullReport.trim() });
-          if (showScanLogs) console.log(`✅ Отчёт отправлен в WhatsApp: ${recipient}`);
+          const label = await chatLabel(batch.jid, sock);
+          check(signal);
+          const summary = await summarizeChat(batch.messages, label, { signal });
+          if (summary) results[index] = { ...batch, label, summary };
         } catch (err) {
-          console.error(`❌ Ошибка отправки отчёта (${recipient}):`, err);
-          sent = false;
+          check(signal);
+          logger.error(`❌ Ошибка резюме (${batch.jid}):`, err.message);
         }
       }
     }
-
-    // Drop the messages we successfully reported so they aren't reported again.
-    // Skipped (active) chats are left untouched and roll into a later report.
-    if (sent) {
-      for (const jid of Object.keys(chatsToSummarize)) {
-        dropReported(jid, scanStart, since);
-      }
+    // Settle all workers before releasing the lock, including on cancellation.
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(config.summaryConcurrency ?? 2, batches.length) }, worker));
+    const failure = workers.find((result) => result.status === 'rejected');
+    if (failure) throw failure.reason;
+    check(signal);
+    const successful = results.filter(Boolean);
+    if (successful.length) {
+      const firstTime = successful.reduce((oldest, batch) => Math.min(oldest, batch.messages[0].time.getTime()), scanStart.getTime());
+      const header = `${REPORT_HEADER}\n_${new Date(firstTime).toLocaleString('ru-RU')} — ${scanStart.toLocaleString('ru-RU')}_\n\n`;
+      const body = successful.map(({ label, messages, summary }) => `📌 *${label}* (${messages.length})\n${summary}`).join('\n\n');
+      const reportId = randomUUID();
+      store.enqueueReport({
+        id: reportId, messageIds: successful.flatMap((batch) => batch.messages.map((m) => m.id)),
+        parts: splitText(body, MAX_REPORT_CHARS - header.length).map((part) => header + part),
+        recipients: recipients.map((jid) => ({ jid, nextPart: 0 })),
+      });
+      if (config.showScanLogs) successful.forEach(({ label, summary }) => logger.log(`📌 ${label}\n${summary}`));
+      await deliver(sock, signal, reportId);
     }
+    check(signal);
+    store.finishScan(scanStart);
   }
 
-  if (showScanLogs) console.log(`\n${'═'.repeat(60)}\n`);
-
-  // Advance the cursor to the oldest message still held (skipped/unsent chats),
-  // so next tick's `since` filter re-includes them; empty store → scanStart.
-  lastScanTime = oldestRemaining(since) ?? scanStart;
-  saveLastScanTime(lastScanTime);
-}
-
-/** Remove messages in (since, scanStart] for a reported chat; clean up empties. */
-function dropReported(jid, scanStart, since) {
-  if (!messages[jid]) return;
-  messages[jid] = messages[jid].filter(
-    (m) => !(m.time > since && m.time <= scanStart),
-  );
-  if (messages[jid].length === 0) delete messages[jid];
-}
-
-/**
- * The oldest remaining message time across all chats, minus 1ms so it stays
- * strictly greater than the cursor on the next `since` filter. Null if empty.
- */
-function oldestRemaining(since) {
-  let oldest = null;
-  for (const msgs of Object.values(messages)) {
-    for (const m of msgs) {
-      if (m.time > since && (oldest === null || m.time < oldest)) oldest = m.time;
+  function runScan(sock, options) {
+    if (inFlight) {
+      if (activeSocket === sock) return inFlight;
+      return inFlight.catch(() => {}).then(() => runScan(sock, options));
     }
+    activeSocket = sock;
+    inFlight = scan(sock, options).finally(() => { inFlight = undefined; activeSocket = undefined; });
+    return inFlight;
   }
-  return oldest ? new Date(oldest.getTime() - 1) : null;
+
+  return { getLastScanTime: store.getLastScanTime, overrideLastScanTime: store.overrideLastScanTime, runScan };
 }

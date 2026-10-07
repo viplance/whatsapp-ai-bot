@@ -1,15 +1,14 @@
-// In-memory message store + chat-label resolution.
-//
-// messages[jid] = [ { time: Date, sender: string, text: string } ]
-export const messages = {};
+// Display-name caches; the durable message queue lives in state.js.
+const groupNamesCache = Object.create(null);
+const contactNamesCache = Object.create(null);
+const pendingGroups = new Map();
 
-const groupNamesCache = {};
-const contactNamesCache = {};
+export function contactName(jid) {
+  return contactNamesCache[jid];
+}
 
-export function storeMessage(jid, sender, text, time) {
-  if (!text) return;
-  if (!messages[jid]) messages[jid] = [];
-  messages[jid].push({ time, sender: sender || 'Unknown', text });
+export function rememberGroup(jid, subject) {
+  if (subject) groupNamesCache[jid] = subject;
 }
 
 export function rememberContactName(jid, name) {
@@ -39,27 +38,37 @@ export function rememberContact(contact) {
 export async function resolveGroupName(jid, sock) {
   if (groupNamesCache[jid]) return groupNamesCache[jid];
   if (!sock) return null;
-
-  try {
-    const metadata = await sock.groupMetadata(jid);
-    if (metadata?.subject) {
-      groupNamesCache[jid] = metadata.subject;
-      return metadata.subject;
-    }
-  } catch {
-    // ignore — name stays unresolved
+  if (!pendingGroups.has(jid)) {
+    pendingGroups.set(jid, (async () => {
+      try {
+        const metadata = await sock.groupMetadata(jid);
+        if (metadata?.subject) {
+          groupNamesCache[jid] = metadata.subject;
+          return metadata.subject;
+        }
+      } catch { /* try again on a later event */ }
+      return null;
+    })());
   }
-  return null;
+  try {
+    return await pendingGroups.get(jid);
+  } finally {
+    pendingGroups.delete(jid);
+  }
 }
 
 export function extractText(msg) {
-  return (
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    null
-  );
+  let message = msg.message;
+  for (let depth = 0; depth < 5 && message; depth++) {
+    const inner = message.ephemeralMessage?.message
+      || message.viewOnceMessage?.message || message.viewOnceMessageV2?.message
+      || message.documentWithCaptionMessage?.message;
+    if (!inner) break;
+    message = inner;
+  }
+  return message?.conversation || message?.extendedTextMessage?.text
+    || message?.imageMessage?.caption || message?.videoMessage?.caption
+    || message?.documentMessage?.caption || null;
 }
 
 export async function chatLabel(jid, sock) {

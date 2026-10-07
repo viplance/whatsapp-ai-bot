@@ -1,211 +1,136 @@
-import makeWASocket, {
-  DisconnectReason,
-  useMultiFileAuthState,
-  Browsers,
-  fetchLatestWaWebVersion,
-} from 'baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, Browsers, fetchLatestWaWebVersion, proto } from 'baileys';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
-import { config, AUTH_FOLDER } from './config.js';
-import {
-  storeMessage,
-  rememberContactName,
-  rememberContact,
-  resolveGroupName,
-  extractText,
-} from './store.js';
-import { runScan, getLastScanTime } from './scanner.js';
-import { matchesFilters, filtersActive } from './filters.js';
+import { rememberContact, rememberGroup } from './store.js';
+import { createFilters } from './filters.js';
+import { createIngestor } from './ingestion.js';
 
-let hourlyTimer = null;
-let fallbackTimer = null;
+export function createWhatsAppService({ config, authFolder, store, scanner,
+  makeSocket = makeWASocket, loadAuth = useMultiFileAuthState,
+  getVersion = fetchLatestWaWebVersion, printQr = (qr) => qrcode.generate(qr, { small: true }),
+  timers = globalThis, now = () => new Date(), logger = console,
+}) {
+  const ingest = createIngestor({ store, filters: createFilters(config.filters), now });
+  let session, reconnectTimer, starting = false, stopped = false, historySince;
 
-function scheduleHourlyCheck(sock) {
-  if (hourlyTimer) return; // guard against stacking on reconnect
-  hourlyTimer = setInterval(() => runScan(sock), config.scanIntervalMs);
-}
-
-function clearTimers() {
-  if (hourlyTimer) {
-    clearInterval(hourlyTimer);
-    hourlyTimer = null;
+  function reconnect() {
+    if (stopped || reconnectTimer) return;
+    reconnectTimer = timers.setTimeout(() => { reconnectTimer = undefined; void start(); }, 5000);
   }
-  if (fallbackTimer) {
-    clearTimeout(fallbackTimer);
-    fallbackTimer = null;
+  function current(record) { return !stopped && session === record && !record.controller.signal.aborted; }
+  function requestScan(record) {
+    if (!current(record) || !record.open) return;
+    void scanner.runScan(record.sock, { signal: record.controller.signal }).catch((err) => {
+      if (!record.controller.signal.aborted) logger.error('❌ Ошибка сканирования:', err.message);
+    });
   }
-}
-
-/** Derive sender name for a message, caching contact names along the way. */
-function resolveSender(msg, jid, isGroup) {
-  const sender = isGroup
-    ? msg.key.participant || msg.pushName || 'Unknown'
-    : msg.pushName || jid.split('@')[0];
-
-  if (!isGroup && !msg.key.fromMe && msg.pushName) {
-    rememberContactName(jid, msg.pushName);
+  function schedule(record) {
+    if (!current(record) || !record.open || record.interval) return;
+    record.interval = timers.setInterval(() => requestScan(record), config.scanIntervalMs);
   }
-  return sender;
-}
+  function clear(record) {
+    record.controller.abort();
+    if (record.interval) timers.clearInterval(record.interval);
+    if (record.fallback) timers.clearTimeout(record.fallback);
+  }
+  function enqueue(record, action) {
+    record.ingestion = record.ingestion.then(async () => {
+      if (current(record)) await action();
+    }).catch((err) => {
+      if (current(record)) {
+        record.ingestionFailed = true;
+        logger.error('❌ Ошибка обработки сообщений:', err.message);
+      }
+    });
+    return record.ingestion;
+  }
 
-/**
- * Whether a message should be processed given config.filters. Matches the
- * filter terms against the group/channel name (for groups) and the sender name.
- * No filters configured → everything passes.
- */
-async function passesFilters(jid, isGroup, sender, sock) {
-  if (!filtersActive) return true;
-
-  const groupName = isGroup ? await resolveGroupName(jid, sock) : null;
-  return matchesFilters(groupName, sender);
-}
-
-export async function startWhatsApp() {
-  const logger = pino({ level: 'warn' });
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-  const { version } = await fetchLatestWaWebVersion();
-
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    logger,
-    browser: Browsers.macOS('Desktop'),
-    syncFullHistory: true,
-    connectTimeoutMs: 60_000,
-    defaultQueryTimeoutMs: 60_000,
-    keepAliveIntervalMs: 30_000,
-    getMessage: async () => undefined,
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  // Learn contact display names from the WA contacts list so reports can label
-  // personal chats by name even when no incoming message carried a pushName.
-  sock.ev.on('contacts.upsert', (contacts) => contacts.forEach(rememberContact));
-  sock.ev.on('contacts.update', (contacts) => contacts.forEach(rememberContact));
-
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('\n📱 Отсканируйте QR-код в WhatsApp → Связанные устройства\n');
-      qrcode.generate(qr, { small: true });
-    }
-
-    if (connection === 'open') {
-      console.log('✅ WhatsApp подключён.');
-      console.log(
-        `   Последнее сканирование: ${getLastScanTime().toLocaleString('ru-RU')}`,
-      );
-      console.log(`   Интервал отчётов: ${config.period}`);
-      console.log(`   Ожидаю синхронизацию истории...\n`);
-
-      // Fallback: if WA sends no history notification within 75s, scan whatever we have.
-      fallbackTimer = setTimeout(async () => {
-        if (!hourlyTimer) {
-          if (config.showScanLogs) {
-            console.log('⏱ История не пришла, запускаю сканирование по таймауту...\n');
+  async function start() {
+    if (starting || session || stopped) return;
+    starting = true;
+    // This replay floor stays fixed for the service lifetime, including reconnects.
+    // Only completed history sync advances the persisted floor for the next process.
+    historySince ??= store.getHistorySince();
+    try {
+      const { state, saveCreds } = await loadAuth(authFolder);
+      const { version } = await getVersion();
+      if (stopped) return;
+      const sock = makeSocket({
+        version, auth: state, logger: pino({ level: 'warn' }),
+        browser: Browsers.macOS('Desktop'), syncFullHistory: true,
+        connectTimeoutMs: 60_000, defaultQueryTimeoutMs: 60_000, keepAliveIntervalMs: 30_000,
+        getMessage: async () => undefined,
+      });
+      const record = { sock, controller: new AbortController(), ingestion: Promise.resolve(), historyStarted: now() };
+      session = record;
+      sock.ev.on('creds.update', () => {
+        if (current(record)) void Promise.resolve().then(saveCreds).catch((err) => logger.error('❌ Ошибка сохранения авторизации:', err.message));
+      });
+      sock.ev.on('contacts.upsert', (contacts) => { if (current(record)) contacts.forEach(rememberContact); });
+      sock.ev.on('contacts.update', (contacts) => { if (current(record)) contacts.forEach(rememberContact); });
+      sock.ev.on('groups.update', (groups) => { if (current(record)) groups.forEach((g) => rememberGroup(g.id, g.subject)); });
+      sock.ev.on('connection.update', (update) => {
+        if (!current(record)) return;
+        if (update.qr) { logger.log('📱 Отсканируйте QR-код в WhatsApp → Связанные устройства'); printQr(update.qr); }
+        if (update.connection === 'open' && !record.open) {
+          record.open = true;
+          logger.log('✅ WhatsApp подключён.');
+          if (record.historyReady) { schedule(record); requestScan(record); }
+          else record.fallback = timers.setTimeout(() => {
+            if (!current(record)) return;
+            schedule(record);
+            requestScan(record);
+          }, 75_000);
+        }
+        if (update.connection === 'close') {
+          clear(record);
+          session = undefined;
+          const error = update.lastDisconnect?.error;
+          if (error?.output?.statusCode === DisconnectReason.loggedOut) {
+            stopped = true;
+            logger.log('🚪 Выход из системы. Удалите папку auth_info_baileys и запустите снова.');
+          } else {
+            logger.error('⚠️ Соединение закрыто; повтор через 5 секунд:', error?.message);
+            reconnect();
           }
-          await runScan(sock);
-          scheduleHourlyCheck(sock);
         }
-      }, 75_000);
-    }
+      });
+      sock.ev.on('messaging-history.set', (event) => enqueue(record, async () => {
+        for (const contact of event.contacts || []) rememberContact(contact);
+        for (const chat of event.chats || []) if (chat.name) rememberGroup(chat.id, chat.name);
+        const stored = await ingest(event.messages, { sock, historySince, signal: record.controller.signal });
+        if (stored && config.showScanLogs) logger.log(`📥 История: получено ${stored} сообщений`);
+        // In Baileys, isLatest marks the first history notification. It does
+        // not mean all batches have arrived. Only FULL at 100% is a checkpoint.
+        if (event.syncType === proto.HistorySync.HistorySyncType.FULL && event.progress === 100) {
+          record.historyReady = true;
+          if (!record.ingestionFailed) store.completeHistory(record.historyStarted);
+          if (record.fallback) timers.clearTimeout(record.fallback);
+          schedule(record);
+          requestScan(record);
+        } else if (record.interval) requestScan(record);
+      }));
+      sock.ev.on('messages.upsert', (event) => {
+        if (event.type !== 'notify') return;
+        return enqueue(record, async () => {
+          const stored = await ingest(event.messages, { sock, signal: record.controller.signal });
+          if (stored && config.showScanLogs) logger.log(`💬 Получено ${stored} сообщений`);
+        });
+      });
+    } catch (err) {
+      logger.error('❌ Ошибка подключения WhatsApp:', err.message);
+      reconnect();
+    } finally { starting = false; }
+  }
 
-    if (connection === 'close') {
-      clearTimers();
-
-      const err = lastDisconnect?.error;
-      const shouldReconnect =
-        err?.output?.statusCode !== DisconnectReason.loggedOut;
-
-      console.log(
-        `⚠️  Соединение закрыто: ${err?.message} | statusCode=${err?.output?.statusCode}`,
-      );
-
-      if (shouldReconnect) {
-        console.log('🔄 Переподключение через 5 секунд...');
-        setTimeout(startWhatsApp, 5000);
-      } else {
-        console.log(
-          '🚪 Выход из системы. Удалите папку auth_info_baileys и запустите снова.',
-        );
-      }
-    }
-  });
-
-  // History sync — fires one or more times after connect; isLatest=true on the final batch.
-  sock.ev.on(
-    'messaging-history.set',
-    async ({ messages: histMsgs, contacts: histContacts, isLatest }) => {
-      for (const contact of histContacts || []) rememberContact(contact);
-
-      let stored = 0;
-
-      for (const msg of histMsgs || []) {
-        const text = extractText(msg);
-        if (!text) continue;
-
-        const time = msg.messageTimestamp
-          ? new Date(Number(msg.messageTimestamp) * 1000)
-          : null;
-
-        // Only keep messages within the scan window.
-        if (!time || time <= getLastScanTime()) continue;
-
-        const jid = msg.key?.remoteJid;
-        if (!jid) continue;
-
-        const isGroup = jid.endsWith('@g.us');
-        const sender = resolveSender(msg, jid, isGroup);
-
-        if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
-
-        storeMessage(jid, sender, text, time);
-        stored++;
-      }
-
-      if (stored > 0 && config.showScanLogs) {
-        console.log(`📥 История: получено ${stored} сообщений`);
-      }
-
-      if (isLatest) {
-        if (config.showScanLogs) {
-          console.log('✅ Синхронизация истории завершена. Запускаю сканирование...\n');
-        }
-        await runScan(sock);
-        scheduleHourlyCheck(sock);
-      }
+  return {
+    start,
+    stop() {
+      stopped = true;
+      if (reconnectTimer) timers.clearTimeout(reconnectTimer);
+      const old = session;
+      session = undefined;
+      if (old) { clear(old); old.sock.end?.(new Error('Bot stopped')); }
     },
-  );
-
-  sock.ev.on('messages.upsert', async (m) => {
-    if (m.type !== 'notify') return;
-
-    for (const msg of m.messages) {
-      const text = extractText(msg);
-      if (!text) continue;
-
-      const jid = msg.key.remoteJid;
-      const isGroup = jid.endsWith('@g.us');
-      const sender = resolveSender(msg, jid, isGroup);
-
-      if (!(await passesFilters(jid, isGroup, sender, sock))) continue;
-
-      // Use message timestamp from WA if available, else now.
-      const time = msg.messageTimestamp
-        ? new Date(Number(msg.messageTimestamp) * 1000)
-        : new Date();
-
-      storeMessage(jid, sender, text, time);
-
-      const label = isGroup ? `[Группа] ${jid.split('@')[0]}` : `[ЛС] ${sender}`;
-
-      if (config.showScanLogs) {
-        console.log(
-          `💬 ${label}: ${text.slice(0, 80)}${text.length > 80 ? '…' : ''}`,
-        );
-      }
-    }
-  });
+  };
 }

@@ -15,4 +15,4 @@ if [ -s "$NVM_DIR/nvm.sh" ]; then
 fi
 
 echo "Node: $(node --version)"
-exec node index.js
+exec node index.js "$@"

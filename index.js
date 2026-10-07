@@ -1,6 +1,5 @@
 import { config } from './src/config.js';
-import { getLastScanTime, overrideLastScanTime } from './src/scanner.js';
-import { startWhatsApp } from './src/whatsapp.js';
+import { scanner, whatsapp } from './src/runtime.js';
 
 // --since=YYYY-MM-DD  override the stored lastScanTime for this run
 const sinceArg = process.argv.find((a) => a.startsWith('--since='));
@@ -11,7 +10,7 @@ if (sinceArg) {
     console.error(`❌ Неверный формат даты для --since: "${val}" (ожидается YYYY-MM-DD или ISO)`);
     process.exit(1);
   }
-  overrideLastScanTime(d);
+  scanner.overrideLastScanTime(d);
   console.log(`⏪ lastScanTime сброшен на ${d.toLocaleString('ru-RU')}`);
 }
 
@@ -24,7 +23,9 @@ console.log(
   `   Фильтры:   ${config.filters.length ? config.filters.join(', ') : '(нет — все чаты)'}`,
 );
 console.log(
-  `   Последнее сканирование: ${getLastScanTime().toLocaleString('ru-RU')}\n`,
+  `   Последнее сканирование: ${scanner.getLastScanTime().toLocaleString('ru-RU')}\n`,
 );
 
-startWhatsApp();
+process.once('SIGINT', () => whatsapp.stop());
+process.once('SIGTERM', () => whatsapp.stop());
+await whatsapp.start();
