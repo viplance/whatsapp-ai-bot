@@ -3,7 +3,7 @@
   "waitForNoActivity": "15min",
   "filters": ["school", "John"],
   "phones": ["own"],
-  "model": "gemini-2.5-flash",
+  "model": "gemini-3.1-flash-lite",
   "summaryConcurrency": 2,
   "showScanLogs": true,
   "defaultLookbackHours": 24,

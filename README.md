@@ -77,6 +77,14 @@ progress is saved, or a network error with an ambiguous send result, can still
 cause that part to be resent. WhatsApp delivery and the local checkpoint cannot
 be committed atomically.
 
+## GCP deployment
+
+The proposed GCP architecture uses Cloud Scheduler, a Cloud Run Job, an external
+configuration service, and durable WhatsApp session and queue storage. See
+[ADR-0001: Scheduled execution on GCP](docs/adr/0001-gcp-scheduled-execution.md)
+for schedule semantics, free-tier estimates, prerequisites, and the rollout plan.
+The scheduled mode and cloud adapters are not implemented yet.
+
 ## Tests
 
 ```sh
