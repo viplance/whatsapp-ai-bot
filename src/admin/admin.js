@@ -3,6 +3,18 @@ let identity, current, formVersion, loading = false;
 const when = (date) => date ? new Date(date).toLocaleString() : '—';
 const active = (record) => ['queued', 'running', 'cancelling'].includes(record?.status);
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; $('notice').hidden = false; }
+function runDetail(row) {
+  if (row.error || row.launchError) return row.error || row.launchError;
+  if (row.mode !== 'summary' || row.status !== 'succeeded') return '';
+  const summary = row.summary;
+  if (!summary) return 'Completed. Delivery details are unavailable for this older run.';
+  if (row.outcome === 'sent') return `${summary.processedMessages} messages summarized; ${summary.deliveredParts} report parts sent; ${summary.pendingMessages} messages waiting.`;
+  if (row.outcome === 'waiting_for_inactivity') return `No report sent. ${summary.pendingMessages} messages are waiting for the chat quiet time.`;
+  const collected = row.collection;
+  if (collected?.decryptionErrors || collected?.messageErrors || collected?.appStateErrors) return 'No report sent. WhatsApp receive/sync errors occurred; inspect Cloud Logging.';
+  if (collected?.filtered) return `No report sent. ${collected.filtered} messages did not match chat filters.`;
+  return 'No report sent. No new messages matched the filters and history window.';
+}
 async function api(path, method = 'GET', body) {
   const response = await fetch(`/api/${path}`, { method, credentials: 'same-origin', cache: 'no-store',
     headers: method === 'GET' ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': identity.csrf },
@@ -75,7 +87,7 @@ async function refresh() {
     $('runs').replaceChildren();
     for (const row of value.operations) {
       const tr = document.createElement('tr');
-      for (const text of [when(row.createdAt), row.mode === 'pair' ? 'Pairing' : 'Summary', row.status, row.error || row.launchError || '']) {
+      for (const text of [when(row.createdAt), row.mode === 'pair' ? 'Pairing' : 'Summary', row.status, runDetail(row)]) {
         const td = document.createElement('td'); td.textContent = text; tr.append(td);
       }
       $('runs').append(tr);
@@ -84,8 +96,9 @@ async function refresh() {
     renderSchedule();
     if (location.hash === '#device-connection' || current.maintenance) {
       const pair = await api('pairing');
-      $('pair-status').textContent = pair ? ({ succeeded: 'Device linked', failed: 'Pairing failed', cancelled: 'Pairing cancelled', queued: 'Starting pairing…', running: 'Scan the QR code', cancelling: 'Cancelling…' }[pair.status] || pair.status) : 'Ready to link';
-      $('pair-detail').textContent = pair?.error || pair?.launchError || (active(pair) ? 'The QR updates automatically. Pairing expires after five minutes.' : '');
+      const syncing = pair?.status === 'running' && pair.stage === 'synchronize';
+      $('pair-status').textContent = syncing ? 'Saving initial messages…' : pair ? ({ succeeded: 'Device linked', failed: 'Pairing failed', cancelled: 'Pairing cancelled', queued: 'Starting pairing…', running: 'Scan the QR code', cancelling: 'Cancelling…' }[pair.status] || pair.status) : 'Ready to link';
+      $('pair-detail').textContent = pair?.error || pair?.launchError || (syncing ? 'The QR was scanned. Keep WhatsApp open while messages and session keys are saved.' : active(pair) ? 'The QR updates automatically. Pairing expires after five minutes.' : '');
       $('cancel').disabled = !active(pair) || pair.owner !== identity.email;
       $('qr').hidden = !pair?.qrDataUrl;
       if (pair?.qrDataUrl) $('qr').src = pair.qrDataUrl;

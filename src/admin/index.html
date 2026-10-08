@@ -35,7 +35,7 @@
             <label>Concurrent summaries<input name="summaryConcurrency" type="number" min="1" max="10" required></label>
             <label>Initial history window, hours<input name="defaultLookbackHours" type="number" min="1" required></label>
           </div>
-          <label>Chat filters<textarea name="filters" rows="3" placeholder="One name fragment per line; empty includes every chat"></textarea></label>
+          <label>Chat filters<textarea name="filters" rows="3" placeholder="One name fragment per line; empty includes every chat"></textarea><small>Matches any part of a group or contact name, ignoring case, including Turkish I/İ/ı.</small></label>
           <label>Report recipients<textarea name="phones" rows="3" required placeholder="One international number per line, or own"></textarea></label>
           <label>Summary instructions<textarea name="systemInstruction" rows="6" maxlength="16000"></textarea></label>
           <div class="actions"><button type="submit">Save settings</button><button type="button" id="reload" class="secondary">Reload</button><button type="button" id="reconcile" class="secondary">Retry schedule update</button></div>

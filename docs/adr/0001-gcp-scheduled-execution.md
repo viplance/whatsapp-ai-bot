@@ -118,7 +118,10 @@ This keeps pairing independent of browser refreshes and HTTP request lifetimes.
 3. The administrator scans it in **WhatsApp → Linked devices → Link a device**.
    Handle Baileys' expected restart after pairing, save all credentials and keys
    continuously, and verify reconnection without a fresh QR before reporting
-   **Linked**. [Baileys pairing flow](https://github.com/WhiskeySockets/baileys.wiki-site/blob/main/docs/socket/connecting.md).
+   **Linked**. Persist matching messages received during pairing and wait through
+   the bounded synchronization window; WhatsApp may not replay that history to
+   a later Job. Pairing does not generate or send reports.
+   [Baileys pairing flow](https://github.com/WhiskeySockets/baileys.wiki-site/blob/main/docs/socket/connecting.md).
 4. The Job closes its connection and clears the QR. The account remains paused
    until the administrator explicitly enables the schedule.
 

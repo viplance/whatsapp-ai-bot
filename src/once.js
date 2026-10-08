@@ -1,5 +1,5 @@
 import makeWASocket, { Browsers, DisconnectReason, fetchLatestWaWebVersion, proto } from 'baileys';
-import pino from 'pino';
+import { createSessionLogger } from './session-logger.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createIngestor } from './ingestion.js';
 import { createFilters } from './filters.js';
@@ -16,7 +16,20 @@ export function connectSession({ auth, config, store, signal, pairing = false,
   let socket, version, closed = false, opened = false, retries = 0, tail = Promise.resolve(), failure;
   const historyStart = new Date();
   const historySince = store?.getHistorySince();
-  const ingest = store && createIngestor({ store, filters: createFilters(config.filters) });
+  const filters = createFilters(config.filters);
+  const metrics = { received: 0, withoutText: 0, ownReports: 0, outsideWindow: 0,
+    filtered: 0, unresolvedGroups: 0, matched: 0, added: 0, duplicates: 0,
+    historyEvents: 0, historyComplete: false, decryptionErrors: 0, messageErrors: 0,
+    historyNotifications: 0, appStateErrors: 0 };
+  const ingest = store && createIngestor({ store, filters, onResult: (result) => {
+    for (const [key, value] of Object.entries(result)) metrics[key] += value;
+  } });
+  const logger = createSessionLogger((event) => {
+    const counter = { whatsapp_decryption_failed: 'decryptionErrors', whatsapp_message_failed: 'messageErrors',
+      whatsapp_history_notification: 'historyNotifications', whatsapp_app_state_sync_failed: 'appStateErrors' }[event.event];
+    if (counter) metrics[counter]++;
+    onDiagnostic(event);
+  });
   let readyResolve, readyReject, historyResolve;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   ready.catch(() => {});
@@ -38,10 +51,10 @@ export function connectSession({ auth, config, store, signal, pairing = false,
   function connect() {
     if (closed) return;
     combined.throwIfAborted();
-    const sock = socketFactory({ version, auth: auth.state, logger: pino({ level: 'silent' }),
+    const sock = socketFactory({ version, auth: auth.state, logger,
       // Desktop + full history advertises DARWIN, which WhatsApp can reject
       // before login. Keep the same WEB_BROWSER platform during pairing and runs.
-      browser: Browsers.macOS('Chrome'), syncFullHistory: !pairing, markOnlineOnConnect: false,
+      browser: Browsers.macOS('Chrome'), syncFullHistory: true, markOnlineOnConnect: false,
       connectTimeoutMs: 45000, defaultQueryTimeoutMs: 30000, getMessage: async () => undefined });
     socket = sock;
     const current = () => !closed && socket === sock && !combined.aborted;
@@ -83,12 +96,14 @@ export function connectSession({ auth, config, store, signal, pairing = false,
     });
     sock.ev.on('messaging-history.set', (event) => {
       if (!current()) return;
+      metrics.historyEvents++;
       void enqueue(async () => {
         for (const contact of event.contacts || []) rememberContact(contact);
         for (const chat of event.chats || []) if (chat.name) rememberGroup(chat.id, chat.name);
         await ingest(event.messages, { sock, historySince, signal: combined });
         if (event.syncType === proto.HistorySync.HistorySyncType.FULL && event.progress === 100 && !failure) {
           await store.completeHistory(historyStart);
+          metrics.historyComplete = true;
           historyResolve();
         }
       });
@@ -111,9 +126,19 @@ export function connectSession({ auth, config, store, signal, pairing = false,
     async collect() {
       const timeout = new AbortController();
       try {
+        if (filters.active && socket?.groupFetchAllParticipating) {
+          try {
+            const groups = Object.values(await socket.groupFetchAllParticipating());
+            for (const group of groups) rememberGroup(group.id, group.subject);
+            metrics.groups = groups.length;
+            metrics.matchingGroups = groups.filter((group) => filters.matches(group.subject)).length;
+          } catch { onDiagnostic({ event: 'whatsapp_group_metadata_failed' }); }
+        }
         await Promise.race([history, sleep(syncWaitMs, undefined, { signal: AbortSignal.any([combined, timeout.signal]) })]);
         await tail;
         combined.throwIfAborted();
+        onDiagnostic({ event: 'whatsapp_collection_finished', ...metrics });
+        return { ...metrics };
       } finally { timeout.abort(); }
     },
     async stop() {

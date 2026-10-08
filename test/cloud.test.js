@@ -15,6 +15,7 @@ import { validateSettings, nextRunAt, scheduleFor, HttpError } from '../src/clou
 import { connectSession, NeedsPairingError } from '../src/once.js';
 import { runCloudWorker } from '../src/cloud/worker.js';
 import { silenceDependencyConsole } from '../src/cloud/logging.js';
+import { createSessionLogger } from '../src/session-logger.js';
 import { buildConfig } from '../src/config-values.js';
 
 const env = { projectId: 'test-project', region: 'europe-west4', configId: 'test', summaryJob: 'summary', pairingJob: 'pair', adminEmails: ['admin@example.com'], iapAudience: 'audience' };
@@ -28,6 +29,16 @@ test('cloud mode suppresses dependency session dumps and restores console afterw
   assert.equal(printed.length, 0);
   console.info('restored');
   assert.deepEqual(printed, [['restored']]);
+});
+
+test('session logger emits only allowlisted events without serializing provider data', () => {
+  const events = [];
+  const logger = createSessionLogger((event) => events.push(event));
+  const secret = { toJSON() { throw new Error('Provider data must never be serialized'); } };
+  logger.error(secret, 'failed to decrypt message');
+  logger.child({ privateKey: 'synthetic-secret' }).info(secret, 'got history notification');
+  logger.error(secret, 'untrusted message containing synthetic-secret');
+  assert.deepEqual(events, [{ event: 'whatsapp_decryption_failed' }, { event: 'whatsapp_history_notification' }]);
 });
 async function fixture() {
   const db = new MemoryFirestore();
@@ -226,7 +237,7 @@ test('pairing and history collection both advertise the supported web platform',
     const config = sockets[0].config;
     const payload = generateLoginNode('15550000000:1@s.whatsapp.net', config);
     assert.equal(payload.webInfo.webSubPlatform, proto.ClientPayload.WebInfo.WebSubPlatform.WEB_BROWSER);
-    assert.equal(config.syncFullHistory, !pairing);
+    assert.equal(config.syncFullHistory, true);
     sockets[0].ev.emit('connection.update', { connection: 'open' });
     await session.ready();
     await session.stop();
@@ -247,6 +258,35 @@ test('finite session persists append messages and advances history only on FULL 
   sockets[0].ev.emit('messaging-history.set', { messages: [], syncType: proto.HistorySync.HistorySyncType.FULL, progress: 100 });
   await session.collect();
   assert.ok(store.getHistorySince() > before);
+  await session.stop();
+});
+
+test('finite collection distinguishes filtered messages from accepted input and receive errors', async () => {
+  const { store } = await stateFixture();
+  const { session, sockets } = await fakeSession({ store, config: buildConfig({ filters: ['School'] }, 'test') });
+  const sock = sockets[0];
+  sock.groupFetchAllParticipating = async () => ({
+    one: { id: 'metrics-school@g.us', subject: 'School group' },
+    two: { id: 'metrics-other@g.us', subject: 'Other group' },
+  });
+  sock.ev.emit('connection.update', { connection: 'open' });
+  await session.ready();
+  await session.collect();
+  sock.ev.emit('messages.upsert', { type: 'append', messages: [
+    waMessage('accepted', { jid: 'metrics-school@g.us' }),
+    waMessage('filtered', { jid: 'metrics-other@g.us' }),
+    { key: {}, message: {} },
+  ] });
+  sock.config.logger.error({ key: 'synthetic-secret' }, 'failed to decrypt message');
+  const result = await session.collect();
+  assert.equal(result.received, 3);
+  assert.equal(result.added, 1);
+  assert.equal(result.filtered, 1);
+  assert.equal(result.withoutText, 1);
+  assert.equal(result.decryptionErrors, 1);
+  assert.equal(result.groups, 2);
+  assert.equal(result.matchingGroups, 1);
+  assert.equal(JSON.stringify(result).includes('synthetic-secret'), false);
   await session.stop();
 });
 
@@ -339,8 +379,40 @@ test('worker retry recovers the same failed execution and preserves pending work
   assert.deepEqual(result, { completed: true });
   assert.equal(connected, 1);
   assert.deepEqual(sent, ['second']);
+  const operation = (await db.doc('configs/test/operations/execution-summary-test').get()).data();
+  assert.equal(operation.outcome, 'sent');
+  assert.equal(operation.summary.deliveredParts, 1);
+  assert.equal(operation.summary.completedReports, 1);
   assert.equal((await db.doc('configs/test').get()).data().activeOperation, null);
   assert.equal((await runtimeDb.doc('accounts/test/locks/active').get()).data().expiresAt, 0);
+});
+
+test('successful workers distinguish an empty run from messages waiting for quiet time', async () => {
+  for (const queued of [false, true]) {
+    const { db } = await fixture();
+    const runtimeDb = new MemoryFirestore();
+    await db.doc('configs/test').update({ enabled: true, authStatus: 'linked' });
+    await db.doc('configs/test/versions/1').set({ settings: { period: '4h', waitForNoActivity: '15min' } });
+    await runtimeDb.doc('accounts/test').set({ activeGeneration: 'existing' });
+    const lease = await acquireLease({ db: runtimeDb, configId: 'test' });
+    const store = await createFirestoreState({ db: runtimeDb, configId: 'test', lease, defaultLookbackMs: 86400000 });
+    if (queued) await store.addMessages([{ ...message('recent'), time: new Date() }]);
+    await lease.release();
+    await runCloudWorker({ env, controlDb: db, runtimeDb,
+      variables: { REQUEST_ID: 'outcome', SCHEDULE_REVISION: '1', GEMINI_API_KEY: 'test' },
+      sessionFactory: ({ signal }) => ({ signal,
+        ready: async () => ({ user: { id: 'self@s.whatsapp.net' }, sendMessage: async () => { throw new Error('No report should be sent'); } }),
+        collect: async () => ({ received: 0, filtered: 0, added: 0 }), stop: async () => {},
+      }),
+      summarizeFactory: () => async () => { throw new Error('No eligible messages should be summarized'); },
+    });
+    const operation = (await db.doc('configs/test/operations/outcome').get()).data();
+    assert.equal(operation.status, 'succeeded');
+    assert.equal(operation.outcome, queued ? 'waiting_for_inactivity' : 'no_messages');
+    assert.equal(operation.summary.pendingMessages, queued ? 1 : 0);
+    assert.equal(operation.summary.deliveredParts, 0);
+    assert.equal(operation.collection.received, 0);
+  }
 });
 
 test('failed re-pairing preserves the previous session and queue and leaves scheduling paused', async (t) => {
@@ -348,14 +420,17 @@ test('failed re-pairing preserves the previous session and queue and leaves sche
   const { db } = await fixture();
   const runtimeDb = new MemoryFirestore();
   await runtimeDb.doc('accounts/test').set({ activeGeneration: 'previous-session' });
-  await runtimeDb.doc('accounts/test/messages/existing').set({ id: 'pending' });
+  const initialLease = await acquireLease({ db: runtimeDb, configId: 'test' });
+  const initialStore = await createFirestoreState({ db: runtimeDb, configId: 'test', lease: initialLease, defaultLookbackMs: 86400000 });
+  await initialStore.addMessages([message('existing')]);
+  await initialLease.release();
   await db.doc('configs/test').update({ maintenance: true, latestPairing: 'pair-id', activeOperation: 'pair-id', authStatus: 'linked' });
   await db.doc('configs/test/operations/pair-id').set({ id: 'pair-id', status: 'queued' });
   await assert.rejects(runCloudWorker({ mode: 'pair', env, controlDb: db, runtimeDb, variables: { REQUEST_ID: 'pair-id' },
     sessionFactory: () => ({ ready: async () => { throw new Error('Pairing failed'); }, stop: async () => {} }),
   }), /Pairing failed/);
   assert.equal((await runtimeDb.doc('accounts/test').get()).data().activeGeneration, 'previous-session');
-  assert.equal((await runtimeDb.doc('accounts/test/messages/existing').get()).exists, true);
+  assert.equal((await runtimeDb.doc(`accounts/test/messages/${documentId(message('existing').id)}`).get()).exists, true);
   assert.equal((await db.doc('configs/test').get()).data().maintenance, false);
   assert.equal((await db.doc('configs/test').get()).data().enabled, false);
   assert.equal((await db.doc('configs/test/operations/pair-id').get()).data().status, 'failed');

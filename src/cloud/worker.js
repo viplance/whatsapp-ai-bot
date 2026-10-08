@@ -75,7 +75,9 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
     const generation = pairing ? id : current?.activeGeneration;
     if (!generation) throw new NeedsPairingError();
     const auth = await createFirestoreAuth({ db: runtimeDb, configId: env.configId, generation, lease });
-    const store = pairing ? undefined : await createFirestoreState({ db: runtimeDb, configId: env.configId, lease, defaultLookbackMs: config.defaultLookbackMs });
+    // WhatsApp can deliver history while the device is being linked. Persist it
+    // under the same lease; it may never be replayed to the summary Job.
+    const store = await createFirestoreState({ db: runtimeDb, configId: env.configId, lease, defaultLookbackMs: config.defaultLookbackMs });
     phase = 'connect';
     session = sessionFactory({ auth, config, store, signal: controller.signal, pairing,
       onDiagnostic: (event) => log({ ...event, id, phase }),
@@ -88,6 +90,11 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
     const socket = await session.ready();
     controller.signal.throwIfAborted();
     if (pairing) {
+      phase = 'synchronize';
+      if ((await opRef.get()).data().status !== 'running') throw new Error('Pairing cancelled');
+      await opRef.update({ qr: null, stage: 'synchronize', updatedAt: iso() });
+      const collection = await session.collect();
+      if (collection) await opRef.set({ collection }, { merge: true });
       phase = 'pair-commit';
       if ((await opRef.get()).data().status !== 'running') throw new Error('Pairing cancelled');
       await auth.flush();
@@ -96,8 +103,10 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
     } else {
       phase = 'synchronize';
       await ref.update({ lastVerifiedAt: iso() });
-      await session.collect();
+      const collection = await session.collect();
+      if (collection) await opRef.set({ collection }, { merge: true });
       phase = 'summary-delivery';
+      const summary = { processedMessages: 0, deliveredParts: 0, completedReports: 0 };
       const scanner = createScanner({ config, store, chatLabel, summarizeChat: summarizeFactory({ config, logger: silent }), normalizeJid: jidNormalizedUser, logger: silent });
       for (;;) {
         session.signal.throwIfAborted();
@@ -107,15 +116,25 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
         if (latest.maintenance || latest.authStatus !== 'linked'
           || (latest.activeOperation && latest.activeOperation !== id)) throw new Error('Run superseded');
         const result = await scanner.runScan(socket, { signal: session.signal });
+        summary.processedMessages += result.processed;
+        summary.deliveredParts += result.deliveredParts;
+        summary.completedReports += result.completedReports;
+        summary.pendingMessages = store.messages().length;
+        summary.pendingReports = result.pendingReports;
+        await opRef.set({ summary }, { merge: true });
         if (result.failed || result.pendingReports) throw new Error('Summary or delivery failed; queued work is preserved');
         if (!result.processed) break;
       }
+      const outcome = summary.deliveredParts ? 'sent' : summary.pendingMessages ? 'waiting_for_inactivity' : 'no_messages';
+      await opRef.set({ outcome }, { merge: true });
+      log({ event: 'worker_summary_finished', id, outcome, ...summary });
     }
     phase = 'shutdown';
     await session.stop(); session = undefined;
     if (store) {
       const queued = store.messages();
-      await ref.update({ queueCount: queued.length, queueOldestAt: queued.length ? new Date(Math.min(...queued.map((m) => m.time.getTime()))).toISOString() : null, lastSuccessfulRunAt: iso() });
+      await ref.update({ queueCount: queued.length, queueOldestAt: queued.length ? new Date(Math.min(...queued.map((m) => m.time.getTime()))).toISOString() : null,
+        ...(!pairing ? { lastSuccessfulRunAt: iso() } : {}) });
     }
     completed = true;
     return { completed: true };

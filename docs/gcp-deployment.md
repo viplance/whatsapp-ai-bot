@@ -43,7 +43,8 @@ chat state, Git metadata, and tests. Cloud mode disables conversation logging.
 It also suppresses direct library console output: libsignal otherwise prints
 session objects outside the Baileys logger. Workers emit structured outcomes,
 phases, durations, Web versions, and numeric connection status codes without
-provider error objects.
+provider error objects. Aggregate collection counters distinguish filter/window
+exclusions from receive and sync errors without logging message content.
 Firestore databases have deletion protection. No service-account keys are
 created; Google libraries use the workload's identity.
 
@@ -158,8 +159,11 @@ depend on the key's project.
    account. Check that an unauthenticated browser cannot reach the application.
 3. Open **Device connection → Link device**. Scan the QR in the phone's **Linked devices**
    screen. Refreshing the browser resumes polling; cancellation stops the Job.
-4. Wait for **Device linked**. Pairing saves all keys and reconnects before marking
-   the session ready; scheduling stays paused. Re-linking preserves queued work.
+4. Wait for **Device linked**. After scanning, **Saving initial messages…** means
+   the worker is persisting session keys and matching history within its bounded
+   synchronization window. Pairing creates no summaries and sends no reports;
+   saved messages remain queued for the next summary run. Scheduling stays paused.
+   Re-linking preserves queued work.
 5. Check settings and recipients, enable the account, then select **Run now**.
    Run now uses the same worker and requires an enabled account. Observe a
    successful report, then pause again for controlled offline tests.
@@ -177,6 +181,12 @@ Settings and Overview show whether scheduled runs are enabled or paused. Pending
 or failed updates are shown separately; `applied` only confirms that settings
 were reconciled, including a pause. Changing the enable checkbox requires
 **Save settings**, and the status text explains any unsaved enable/pause change.
+
+A successful execution can have nothing to send. Recent run details distinguish
+reports sent, messages waiting for the configured quiet time, and no matching
+messages. They also flag receive/sync errors. If a report is missing, compare the
+collection counters and full chat names with **Settings → Chat filters** before
+changing recipients or the Gemini key. An empty filter includes every chat.
 
 Reports are delivered at least once. A crash between a confirmed WhatsApp send
 and saving its acknowledgement can duplicate that part. Durable recipient/part

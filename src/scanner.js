@@ -10,6 +10,7 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
   const check = (signal) => signal?.throwIfAborted();
 
   async function deliver(sock, signal, reportId) {
+    const result = { deliveredParts: 0, completedReports: 0 };
     for (const report of store.reports()) {
       if (reportId && report.id !== reportId) continue;
       for (const recipient of report.recipients) {
@@ -24,12 +25,17 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
           }
           // Persist even if a disconnect occurred while sendMessage completed.
           await store.recordDelivery(report.id, recipient.jid, part + 1);
+          result.deliveredParts++;
           recipient.nextPart = part + 1;
           if (config.showScanLogs) logger.log(`✅ Отчёт отправлен: ${recipient.jid} (${part + 1}/${report.parts.length})`);
         }
       }
-      if (report.recipients.every((r) => r.nextPart === report.parts.length)) await store.acknowledgeReport(report.id);
+      if (report.recipients.every((r) => r.nextPart === report.parts.length)) {
+        await store.acknowledgeReport(report.id);
+        result.completedReports++;
+      }
     }
+    return result;
   }
 
   async function scan(sock, { signal } = {}) {
@@ -39,7 +45,7 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
       ? normalizeJid(sock.user.id) : `${phone}@s.whatsapp.net`))];
     if (!recipients.length || recipients.some((jid) => !jid)) throw new Error('No valid report recipients');
     const scanStart = now();
-    await deliver(sock, signal);
+    const delivery = await deliver(sock, signal);
     const reserved = new Set(store.reports().flatMap((r) => r.messageIds));
     const chats = new Map();
     for (const msg of store.messages()) {
@@ -99,12 +105,14 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
         recipients: recipients.map((jid) => ({ jid, nextPart: 0 })),
       });
       if (config.showScanLogs) successful.forEach(({ label, summary }) => logger.log(`📌 ${label}\n${summary}`));
-      await deliver(sock, signal, reportId);
+      const sent = await deliver(sock, signal, reportId);
+      delivery.deliveredParts += sent.deliveredParts;
+      delivery.completedReports += sent.completedReports;
     }
     check(signal);
     await store.finishScan(scanStart);
     return { processed: successful.reduce((count, batch) => count + batch.messages.length, 0),
-      failed: batches.length - successful.length, pendingReports: store.reports().length };
+      failed: batches.length - successful.length, pendingReports: store.reports().length, ...delivery };
   }
 
   function runScan(sock, options) {

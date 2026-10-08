@@ -27,7 +27,7 @@ stored in `auth_info_baileys/`.
 | --- | --- | --- |
 | `period` | `"60min"` | Scan interval; at least one second. Supports `ms`, `s`, `min`, `m`, `h`, or minutes as a number. |
 | `waitForNoActivity` | `"0"` | Required quiet time since the newest message in a chat; zero disables the gate. |
-| `filters` | `[]` | Case-insensitive substrings of group or sender/contact names. An empty array includes every chat. |
+| `filters` | `[]` | Case-insensitive substrings of group or sender/contact names; Turkish `I/İ/ı` variants match consistently. An empty array includes every chat. |
 | `phones` | `["own"]` | At least one recipient: `"own"` or an international phone number. |
 | `model` | `"gemini-2.5-flash"` | Gemini model ID available to your API key. |
 | `systemInstruction` | `""` | Instructions for the summaries. The example requests Russian summaries. |
