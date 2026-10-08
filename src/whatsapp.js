@@ -104,16 +104,17 @@ export function createWhatsAppService({ config, authFolder, store, scanner,
         // not mean all batches have arrived. Only FULL at 100% is a checkpoint.
         if (event.syncType === proto.HistorySync.HistorySyncType.FULL && event.progress === 100) {
           record.historyReady = true;
-          if (!record.ingestionFailed) store.completeHistory(record.historyStarted);
+          if (!record.ingestionFailed) await store.completeHistory(record.historyStarted);
           if (record.fallback) timers.clearTimeout(record.fallback);
           schedule(record);
           requestScan(record);
         } else if (record.interval) requestScan(record);
       }));
       sock.ev.on('messages.upsert', (event) => {
-        if (event.type !== 'notify') return;
+        if (!['notify', 'append'].includes(event.type)) return;
         return enqueue(record, async () => {
-          const stored = await ingest(event.messages, { sock, signal: record.controller.signal });
+          const stored = await ingest(event.messages, { sock,
+            ...(event.type === 'append' ? { historySince } : {}), signal: record.controller.signal });
           if (stored && config.showScanLogs) logger.log(`💬 Получено ${stored} сообщений`);
         });
       });

@@ -12,7 +12,7 @@ pnpm install
 cp config.json.example config.json
 ```
 
-Create `.env` containing `GEMINI_API_KEY=your-key`, adjust `config.json`, then run:
+Copy `.env.example` to `.env`, set `GEMINI_API_KEY`, adjust `config.json`, then run:
 
 ```sh
 pnpm start
@@ -79,11 +79,23 @@ be committed atomically.
 
 ## GCP deployment
 
-The proposed GCP architecture uses Cloud Scheduler, a Cloud Run Job, an external
-configuration service, and durable WhatsApp session and queue storage. See
+Cloud mode uses a scheduled summary Job, a temporary pairing Job, and an
+IAP-protected admin UI. Firestore stores configuration, session keys, and queued
+work; Secret Manager holds the Gemini key. Local continuous mode stays available.
+
+Follow the [CLI deployment guide](docs/gcp-deployment.md). See
 [ADR-0001: Scheduled execution on GCP](docs/adr/0001-gcp-scheduled-execution.md)
-for schedule semantics, free-tier estimates, prerequisites, and the rollout plan.
-The scheduled mode and cloud adapters are not implemented yet.
+for the architecture, schedule semantics, and cost estimates.
+
+Keep project-specific deployment parameters in `.env.gcp` (copy
+`.env.gcp.example`). Local environment files and `docs/local/` deployment notes
+are ignored by Git and excluded from build uploads.
+
+For a finite run using local files:
+
+```sh
+pnpm start --once
+```
 
 ## Tests
 

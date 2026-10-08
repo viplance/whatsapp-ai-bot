@@ -23,12 +23,12 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
             break;
           }
           // Persist even if a disconnect occurred while sendMessage completed.
-          store.recordDelivery(report.id, recipient.jid, part + 1);
+          await store.recordDelivery(report.id, recipient.jid, part + 1);
           recipient.nextPart = part + 1;
           if (config.showScanLogs) logger.log(`✅ Отчёт отправлен: ${recipient.jid} (${part + 1}/${report.parts.length})`);
         }
       }
-      if (report.recipients.every((r) => r.nextPart === report.parts.length)) store.acknowledgeReport(report.id);
+      if (report.recipients.every((r) => r.nextPart === report.parts.length)) await store.acknowledgeReport(report.id);
     }
   }
 
@@ -58,8 +58,10 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
         if (batch.length && size + msg.text.length > MAX_BATCH_CHARS) break;
         batch.push(msg);
         size += msg.text.length;
+        if (batch.length >= (config.maxMessagesPerBatch ?? Infinity)) break;
       }
       if (batch.length) batches.push({ jid, messages: batch });
+      if (batches.length >= (config.maxChatsPerScan ?? Infinity)) break;
     }
     const results = new Array(batches.length);
     let next = 0;
@@ -90,8 +92,9 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
       const header = `${REPORT_HEADER}\n_${new Date(firstTime).toLocaleString('ru-RU')} — ${scanStart.toLocaleString('ru-RU')}_\n\n`;
       const body = successful.map(({ label, messages, summary }) => `📌 *${label}* (${messages.length})\n${summary}`).join('\n\n');
       const reportId = randomUUID();
-      store.enqueueReport({
+      await store.enqueueReport({
         id: reportId, messageIds: successful.flatMap((batch) => batch.messages.map((m) => m.id)),
+        ...(config.configVersion ? { configVersion: config.configVersion } : {}),
         parts: splitText(body, MAX_REPORT_CHARS - header.length).map((part) => header + part),
         recipients: recipients.map((jid) => ({ jid, nextPart: 0 })),
       });
@@ -99,7 +102,9 @@ export function createScanner({ config, store, summarizeChat, chatLabel, normali
       await deliver(sock, signal, reportId);
     }
     check(signal);
-    store.finishScan(scanStart);
+    await store.finishScan(scanStart);
+    return { processed: successful.reduce((count, batch) => count + batch.messages.length, 0),
+      failed: batches.length - successful.length, pendingReports: store.reports().length };
   }
 
   function runScan(sock, options) {

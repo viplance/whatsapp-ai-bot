@@ -6,6 +6,7 @@
   "main": "index.js",
   "scripts": {
     "start": "bash ./scripts/start.sh",
+    "deploy:gcp": "node --env-file=.env.gcp scripts/deploy-gcp.js",
     "test": "node --test test/*.test.js"
   },
   "engines": {
@@ -19,10 +20,13 @@
     ]
   },
   "dependencies": {
+    "@google-cloud/firestore": "^9.3.1",
     "@google/genai": "^2.27.0",
     "baileys": "7.0.0-rc.9",
     "dotenv": "^16.6.1",
+    "google-auth-library": "^11.2.0",
     "pino": "^9.14.0",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   }
 }

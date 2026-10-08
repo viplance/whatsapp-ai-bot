@@ -28,4 +28,7 @@ console.log(
 
 process.once('SIGINT', () => whatsapp.stop());
 process.once('SIGTERM', () => whatsapp.stop());
-await whatsapp.start();
+if (process.argv.includes('--once')) {
+  const { runLocalOnce } = await import('./src/local-once.js');
+  await runLocalOnce();
+} else await whatsapp.start();

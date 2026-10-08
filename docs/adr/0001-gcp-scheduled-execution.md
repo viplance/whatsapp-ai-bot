@@ -1,6 +1,7 @@
 # ADR-0001: Scheduled execution of the WhatsApp bot on GCP
 
-**Date:** 2026-10-07 · **Status:** Target architecture; not yet implemented.
+**Date:** 2026-10-07 · **Status:** Implemented; production validation pending.
+**Updated:** 2026-10-08 — cloud workers, browser administration, and deployment.
 
 ## Decision
 
@@ -8,9 +9,11 @@ Run the bot as a **Cloud Run Job triggered by Cloud Scheduler**, initially every
 four hours. Each run connects to WhatsApp, collects messages, sends summaries,
 and exits. Consider hourly runs after measuring synchronization time and costs.
 
-A separate configuration service stores settings in Firestore and updates
-Scheduler when `period` changes. Firestore also stores the WhatsApp session and
-processing state; Secret Manager holds the Gemini key.
+A small **admin UI and API on Cloud Run** manages settings, device pairing, and
+runs. It stores settings in Firestore and updates Scheduler when `period` changes.
+Bot Jobs store the WhatsApp session and processing state in Firestore;
+Secret Manager holds the Gemini key. A separate, temporary pairing Job uses the
+same bot image to link the device from the browser.
 
 **Before adopting this design, verify that WhatsApp delivers all expected messages
 after one and four hours offline.** Report delays of several hours must also be
@@ -23,20 +26,28 @@ and saves its session and queue to local files. An HTTP function cannot reliably
 continue this background work after returning a response.
 [Function lifecycle limits](https://docs.cloud.google.com/run/docs/tips/functions-best-practices).
 
-A Job fits a process that finishes and exits. The configuration service can reuse
-the Gen2 HTTP function patterns from `../cloud-functions` and scale to zero.
+A Job fits a process that finishes and exits. The admin service reuses the Node.js
+24 and GCP patterns from `../cloud-functions`, serving HTML and a JSON API from one
+origin with minimum instances set to zero.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    Admin["Administrator"] --> Settings["Configuration service"]
-    Settings --> Store["Firestore: settings, session, queue"]
+    Admin["Browser"] --> IAP["Google sign-in via IAP"]
+    IAP --> Settings["Cloud Run: admin UI and API"]
+    Settings <--> Control["Firestore: settings, status, pairing requests"]
     Settings --> Scheduler["Cloud Scheduler"]
-    Scheduler --> Bot["Cloud Run Job"]
-    Bot <--> Store
+    Settings -->|Manual run| Bot["Cloud Run Job: summaries"]
+    Settings -->|Link device| Pair["Cloud Run Job: pairing"]
+    Scheduler --> Bot
+    Bot <--> Control
+    Pair <--> Control
+    Store["Firestore: session, lock, queue"] <--> Bot
+    Pair <--> Store
     Secrets["Secret Manager"] --> Bot
     Bot <--> WhatsApp["WhatsApp via Baileys"]
+    Pair <--> WhatsApp
     Bot --> Gemini["Gemini API"]
 ```
 
@@ -55,7 +66,87 @@ Each run:
 
 Start with **1 vCPU, 512 MiB, one task, a 10-minute timeout, and at most one retry**.
 The worker needs its own deadline with time left for shutdown. Place it near the
-Firestore database; `us-central1` is a candidate. Adjust resources after measuring.
+Firestore database. The initial deployment uses `europe-west4`, alongside the
+project's existing databases. Adjust resources after measuring.
+
+## Admin experience
+
+The first version supports one WhatsApp account and a small allowlist of
+administrators, with three views:
+
+| View | What the administrator can do |
+| --- | --- |
+| Overview | See whether the device is linked, the next scheduled run, recent outcomes, queue age, and actionable errors. Run now when enabled and not pairing. |
+| Settings | Edit the [existing bot settings](../../config.json.example), time zone, and enabled state. See when a schedule change is pending or failed, and retry it. |
+| Device connection | Link or re-link a device, scan the current QR code, cancel pairing, and see success, expiry, or failure. |
+
+Between scheduled runs, a closed WhatsApp connection is expected. Show **Linked**
+with the last verification time, separately from **Running**, **Paused**, or
+**Needs pairing**. An accepted manual run appears as queued until the worker starts;
+show success only after it finishes. Poll status only while the page is visible.
+Do not show conversation content or credentials in the admin UI.
+
+Protect the entire service with
+[IAP directly on Cloud Run](https://docs.cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run),
+using Google sign-in and an explicit account allowlist. This avoids a separate
+load balancer. Gmail accounts and projects without an organization require the
+documented external/custom OAuth setup. Validate the
+[signed user identity](https://docs.cloud.google.com/iap/docs/signed-headers-howto)
+in the backend and protect state-changing requests against CSRF.
+
+The browser calls only the admin API. That API owns settings validation, version
+checks, schedule reconciliation, and Job invocation. Repeated Run now or Pair
+requests use idempotency keys; every execution also respects the shared account
+lock. API responses expose operation IDs and sanitized status, not GCP tokens.
+Grant the API read/cancel access to the two Job definitions; reconcile stale UI
+status with Cloud Run execution state if a worker terminates before reporting.
+Keep raw logs in Cloud Logging and Gemini secrets in deployment configuration.
+
+## Pairing from the browser
+
+Use a dedicated Job definition running the bot image in a proposed `--pair` mode:
+one task, a five-minute deadline, no automatic retries, and no summary generation.
+The admin API returns after starting it; the Job owns the WhatsApp connection.
+This keeps pairing independent of browser refreshes and HTTP request lifetimes.
+
+1. The administrator chooses **Link device**. The API marks the account as under
+   maintenance and pauses future runs. Pairing starts only after any active bot
+   run finishes or is cancelled, and acquires the same account lock.
+2. Baileys generates a QR challenge. The Job writes the latest challenge and its
+   expiry to a private pairing record. The initiating administrator's browser
+   polls the authenticated API every few seconds and renders the current QR.
+3. The administrator scans it in **WhatsApp → Linked devices → Link a device**.
+   Handle Baileys' expected restart after pairing, save all credentials and keys
+   continuously, and verify reconnection without a fresh QR before reporting
+   **Linked**. [Baileys pairing flow](https://github.com/WhiskeySockets/baileys.wiki-site/blob/main/docs/socket/connecting.md).
+4. The Job closes its connection and clears the QR. The account remains paused
+   until the administrator explicitly enables the schedule.
+
+Re-linking creates a separate session generation and activates it only after
+verification, under the account lock. Preserve the pending queue and reports.
+
+QR responses use `Cache-Control: no-store`; challenges never enter URLs or logs.
+Return a challenge only to the initiating administrator and reject expired
+records even if cleanup has not run. Cancel, expiry, or failure ends the attempt
+and leaves scheduling paused; refreshing the page resumes status checks without
+starting another Job. Cancellation must stop the Job, not just hide its QR.
+Logout sets `needsPairing` and blocks normal runs until pairing succeeds.
+An existing local session can still be imported after stopping the local bot.
+
+Keep control data (settings, sanitized status, temporary QR records) in a separate
+Firestore database from runtime data (credentials, keys, queue, and account lock).
+The admin service account accesses only the control database; only worker service
+accounts access the runtime database. Use database-scoped
+[IAM conditions](https://docs.cloud.google.com/firestore/native/docs/manage-databases)
+and verify denied runtime reads: collection names alone do not isolate server
+credentials. Cross-database updates are not atomic; maintenance checks and the
+account lock must keep pairing exclusive even after partial failures.
+
+This prevents direct runtime reads by the admin identity. Execution overrides
+also permit changing container arguments, so admin/Scheduler identities remain
+trusted control-plane identities with indirect worker privileges. For a stronger
+boundary, add a fixed-argument launcher and remove their override permission.
+The browser API accepts no arbitrary Job arguments or environment variables.
 
 ## Settings and scheduling
 
@@ -113,14 +204,23 @@ The following requirements are essential:
   part but before its progress is saved can still cause a duplicate.
 - **Keep management private.** Separate service accounts for configuration,
   invocation, and runtime. Scheduler uses OAuth for Jobs API calls; overrides
-  require `run.jobs.runWithOverrides`.
+  require `run.jobs.runWithOverrides`, and cancellation requires
+  `run.executions.cancel`.
   [Authentication](https://docs.cloud.google.com/scheduler/docs/http-target-auth)
   and [execution permissions](https://docs.cloud.google.com/run/docs/execute/jobs).
-  Restrict session/key access to runtime and use supported Firestore IAM scopes.
+  Restrict WhatsApp session/key access to worker identities, and Gemini secret
+access to the summarization worker only.
 
-Pair the device interactively in a trusted environment and transfer the entire
-session. Stop the local bot before enabling cloud runs. Logout sets `needsPairing`
-and requires operator action. Keep QR codes and chat content out of routine logs.
+Cloud Scheduler does not support resource-name IAM Conditions. Schedule
+reconciliation needs a project-level custom role containing only `jobs.get`,
+`jobs.update`, `jobs.pause`, and `jobs.enable`; the deployer creates the job.
+This role can affect other Scheduler jobs in the same project, so its grant is
+explicit. The API itself uses a fixed job name. Use a dedicated project when
+stronger isolation is needed. [Supported condition resources](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes).
+
+Stop the local bot before pairing or enabling cloud runs. Both scheduled and
+manual summary runs check maintenance and authorization state before connecting.
+Workers publish sanitized run status for the admin UI without chat content.
 
 Monitor run failures and duration, queue age, synchronization, authentication,
 schedule revisions, and quota usage.
@@ -129,7 +229,7 @@ schedule revisions, and quota usage.
 
 **Potentially, but a zero bill is not guaranteed.** Estimates below are dated
 2026-10-07, for `us-central1`. Existing workloads may already use the allowances;
-remaining quotas in `enotix` have not been audited.
+remaining quotas in the target project have not been audited.
 
 Cloud Run Jobs include **240,000 vCPU·s and 450,000 GiB·s per month**, with a
 minimum one-minute charge per task execution.
@@ -152,6 +252,13 @@ bot. [Scheduler pricing](https://cloud.google.com/scheduler/pricing).
 Only one Firestore database per project receives the free allowance; check the
 selected database and operation volume.
 [Firestore pricing](https://cloud.google.com/firestore/pricing).
+
+The admin service adds request-based compute, and pairing adds short Job runs and
+temporary polling reads. Both scale down when unused. Standard Google Cloud IAP
+protection has [no separate charge](https://cloud.google.com/iap/pricing).
+The second Firestore database has usage charges because the free allowance applies
+to only one database; include these in the estimate rather than assuming the
+admin UI is entirely free.
 
 Account separately for secrets, image storage, builds, logs, outbound traffic,
 and [Gemini usage](https://ai.google.dev/gemini-api/docs/pricing).
@@ -176,10 +283,16 @@ VM eligibility and address charges:
 3. Verify known message IDs after 1h and 4h offline, including groups and media
    captions. Test missing sync completion, retries, crashes, overlapping runs,
    lease loss, logout, and forced timeout.
-4. Deploy the container and private configuration service. Test schedule changes,
-   stale revisions, disabling, and recovery from partial updates.
+4. Deploy the bot and pairing Jobs plus the IAP-protected admin UI/API. Test login
+   and denied access, settings conflicts, schedule reconciliation, manual runs,
+   and recovery from partial updates. Verify pairing success, QR refresh/expiry,
+   browser refresh, cancellation, logout, and exclusivity with scheduled runs.
 5. Check quotas, measure actual resource and Gemini usage, and enable the 4h
    schedule. Move to 1h only with sufficient headroom.
 
-The scheduled mode, cloud adapters, configuration service, and GCP resources are
-not implemented yet.
+The scheduled and pairing modes, Firestore adapters, account lease, admin UI/API,
+and CLI deployment are implemented. See the [deployment guide](../gcp-deployment.md)
+for setup and verification. Live pairing and a complete worker execution have
+been verified. New accounts start with scheduling paused. Delivery of a nonempty
+summary and one-/four-hour offline completeness still require operator
+verification to complete production validation.
