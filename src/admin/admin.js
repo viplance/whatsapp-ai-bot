@@ -211,7 +211,7 @@ $('add-configuration').onclick = () => {
   if (editors.has('draft') || !current) return;
   const base = configurations[0];
   const editor = createEditor({ name: 'New configuration', enabled: false,
-    timezone: base?.timezone || 'Europe/Istanbul', settings: base?.settings || current.settings }, true);
+    timezone: base?.timezone || 'Europe/Istanbul', settings: { ...(base?.settings || current.settings), systemInstruction: '' } }, true);
   $('add-configuration').disabled = true;
   $('configurations-empty').hidden = true;
   location.hash = '#configurations';
