@@ -86,12 +86,18 @@ work; Secret Manager holds the Gemini key. Local continuous mode stays available
 The admin's **Configurations** page supports named, expandable configurations
 with independent filters, recipients, and schedules. Run now is on each item;
 Run all processes every saved configuration, including paused schedules, using
-the shared linked device. Existing settings become **Default configuration**.
+its assigned device. Existing settings become **Default configuration**.
 Use `#configurations` or `#configurations/ID`; old `#settings` links redirect.
 
 Follow the [CLI deployment guide](docs/gcp-deployment.md). See
 [ADR-0001: Scheduled execution on GCP](docs/adr/0001-gcp-scheduled-execution.md)
 for the architecture, schedule semantics, and cost estimates.
+
+[ADR-0002](docs/adr/0002-user-workspace-isolation.md) adds private user workspaces:
+explicit Google subject membership, separate databases and Jobs, multiple devices,
+and one shared dispatcher. Follow the [workspace rollout guide](docs/gcp-workspaces.md)
+to migrate an existing deployment or provision another user. Legacy deployments
+remain shared until migration and admin cutover are complete.
 
 Keep project-specific deployment parameters in `.env.gcp` (copy
 `.env.gcp.example`). Local environment files and `docs/local/` deployment notes

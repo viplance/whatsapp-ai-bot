@@ -7,6 +7,8 @@ import { createGoogleApi } from './google.js';
 import { createControl } from './control.js';
 import { createAdminAuthenticator, checkMutation } from './admin-auth.js';
 import { HttpError } from './settings.js';
+import { resolveWorkspace } from './workspaces.js';
+import { createWorkspaceControl } from './workspace-control.js';
 
 async function readBody(request) {
   let size = 0;
@@ -20,7 +22,7 @@ async function readBody(request) {
   catch { throw new HttpError(400, 'Invalid JSON.'); }
 }
 
-export function createAdminServer({ env, control, authenticate = createAdminAuthenticator({ env }) }) {
+export function createAdminServer({ env, control: legacyControl, resolveControl, authenticate = createAdminAuthenticator({ env }) }) {
   const assets = { '/': ['index.html', 'text/html'], '/admin.js': ['admin.js', 'text/javascript'], '/admin.css': ['admin.css', 'text/css'] };
   return createServer(async (request, response) => {
     response.setHeader('Cache-Control', 'no-store');
@@ -30,9 +32,13 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
     response.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const json = (status, value) => { response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); response.end(JSON.stringify(value)); };
     try {
-      const path = new URL(request.url, 'https://admin.invalid').pathname;
+      const url = new URL(request.url, 'https://admin.invalid'), path = url.pathname;
       if (path === '/healthz' && request.method === 'GET') return json(200, { ok: true });
       const identity = await authenticate(request);
+      const scoped = resolveControl ? await resolveControl(identity, request) : null;
+      const control = scoped?.control || legacyControl;
+      const actor = scoped ? identity.userId : identity.email;
+      const selectedDevice = url.searchParams.get('deviceId');
       if (identity.newCookie) response.setHeader('Set-Cookie', `__Host-whatsapp-csrf=${identity.csrf}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600`);
       if (request.method === 'GET' && assets[path]) {
         const [file, type] = assets[path];
@@ -41,11 +47,12 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
         return;
       }
       if (request.method === 'GET') {
-        if (path === '/api/session') return json(200, { email: identity.email, csrf: identity.csrf });
+        if (path === '/api/session') return json(200, { email: identity.email, userId: identity.userId, csrf: identity.csrf,
+          ...(scoped ? { workspaceId: scoped.workspace.id, workspaceName: scoped.workspace.name, devicesEnabled: true } : {}) });
         if (path === '/api/overview') return json(200, await control.overview());
         if (path === '/api/configurations') return json(200, await control.overview());
         if (path === '/api/pairing') {
-          const value = await control.pairing(identity.email);
+          const value = await control.pairing(actor, selectedDevice);
           if (value?.qr) { value.qrDataUrl = await QRCode.toDataURL(value.qr, { width: 300, margin: 2 }); delete value.qr; }
           return json(200, value);
         }
@@ -54,18 +61,27 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
       if (!['POST', 'PUT', 'DELETE'].includes(request.method)) throw new HttpError(405, 'Method not allowed.');
       checkMutation(request, identity);
       const body = await readBody(request);
+      if (scoped && body.workspaceId !== undefined && body.workspaceId !== scoped.workspace.id) throw new HttpError(404, 'Resource not found.');
+      if (scoped && (['/api/pairing', '/api/pairing/cancel', '/api/configurations/run-all'].includes(path)
+        || path.endsWith('/run'))) {
+        if (Object.keys(body).some((key) => !['idempotencyKey', 'deviceId', 'workspaceId'].includes(key))) throw new HttpError(400, 'Unsupported request fields.');
+      }
+      if (scoped && path === '/api/devices' && request.method === 'POST') return json(201, await control.createDevice(body, actor));
+      const device = path.match(/^\/api\/devices\/([a-z0-9-]{1,60})$/);
+      if (scoped && device && request.method === 'DELETE') return json(200, await control.removeDevice(device[1], body));
       const item = path.match(/^\/api\/configurations\/([a-z0-9-]{1,60})(\/run)?$/);
-      if (path === '/api/configurations' && request.method === 'POST') return json(201, await control.createConfiguration(body, identity.email));
-      if (path === '/api/configurations/run-all' && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, identity.email, 'all'));
-      if (item && item[2] && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, identity.email, item[1]));
-      if (item && !item[2] && request.method === 'PUT') return json(200, await control.updateConfiguration(item[1], body, identity.email));
-      if (item && !item[2] && request.method === 'DELETE') return json(200, await control.removeConfiguration(item[1], body, identity.email));
-      if (path === '/api/settings' && request.method === 'PUT') return json(200, await control.update(body, identity.email));
+      if (path === '/api/configurations' && request.method === 'POST') return json(201, await control.createConfiguration(body, actor));
+      if (path === '/api/configurations/run-all' && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, actor, 'all'));
+      if (item && item[2] && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, actor, item[1], body.deviceId));
+      if (item && !item[2] && request.method === 'PUT') return json(200, await control.updateConfiguration(item[1], body, actor));
+      if (item && !item[2] && request.method === 'DELETE') return json(200, await control.removeConfiguration(item[1], body, actor));
+      if (scoped && ['/api/settings', '/api/run'].includes(path)) throw new HttpError(404, 'Not found.');
+      if (path === '/api/settings' && request.method === 'PUT') return json(200, await control.update(body, actor));
       if (request.method === 'POST') {
         if (path === '/api/reconcile') { await control.reconcile(); return json(200, { applied: true }); }
-        if (path === '/api/run') return json(202, await control.start('summary', body.idempotencyKey, identity.email));
-        if (path === '/api/pairing') return json(202, await control.start('pair', body.idempotencyKey, identity.email));
-        if (path === '/api/pairing/cancel') { await control.cancelPairing(identity.email); return json(200, { cancelled: true }); }
+        if (path === '/api/run') return json(202, await control.start('summary', body.idempotencyKey, actor));
+        if (path === '/api/pairing') return json(202, await control.start('pair', body.idempotencyKey, actor, undefined, body.deviceId));
+        if (path === '/api/pairing/cancel') { await control.cancelPairing(actor, body.deviceId); return json(200, { cancelled: true }); }
       }
       throw new HttpError(404, 'Not found.');
     } catch (error) {
@@ -79,9 +95,16 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
 
 if (process.argv[1]?.endsWith('/cloud/admin.js')) {
   const env = cloudEnvironment();
-  const db = new Firestore({ projectId: env.projectId, databaseId: env.controlDatabase });
-  const control = createControl({ db, env, google: createGoogleApi({ env }) });
-  const server = createAdminServer({ env, control });
+  const clients = new Map();
+  const database = (id) => { if (!clients.has(id)) clients.set(id, new Firestore({ projectId: env.projectId, databaseId: id })); return clients.get(id); };
+  const registryDb = env.workspaceMode ? database(env.registryDatabase) : null;
+  const resolveControl = registryDb ? async (identity, request) => {
+    const resolved = await resolveWorkspace({ registryDb, env, identity, requestedId: request.headers['x-workspace-id'] });
+    return { ...resolved, control: createWorkspaceControl({ db: database(resolved.env.controlDatabase), registryDb,
+      env: resolved.env, google: createGoogleApi({ env: resolved.env, fixed: true }) }) };
+  } : undefined;
+  const control = registryDb ? undefined : createControl({ db: database(env.controlDatabase), env, google: createGoogleApi({ env }) });
+  const server = createAdminServer({ env, control, resolveControl });
   server.listen(env.port, '0.0.0.0', () => console.log(JSON.stringify({ event: 'admin_listening', port: env.port })));
   process.once('SIGTERM', () => server.close());
 }

@@ -8,6 +8,9 @@ export function cloudEnvironment(env = process.env) {
   const configId = env.CONFIG_ID || 'whatsapp-main';
   if (!/^[a-z0-9-]{1,60}$/.test(configId)) throw new Error('Invalid CONFIG_ID');
   return { projectId, region, configId,
+    workspaceMode: env.WORKSPACE_MODE === 'true', workspaceId: env.WORKSPACE_ID,
+    registryDatabase: env.REGISTRY_DATABASE || 'whatsapp-registry',
+    registryServiceUrl: env.REGISTRY_SERVICE_URL,
     controlDatabase: env.CONTROL_DATABASE || 'whatsapp-control',
     runtimeDatabase: env.RUNTIME_DATABASE || 'whatsapp-runtime',
     summaryJob: env.SUMMARY_JOB || 'whatsapp-summary', pairingJob: env.PAIRING_JOB || 'whatsapp-pairing',

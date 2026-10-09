@@ -1,10 +1,34 @@
 const $ = (id) => document.getElementById(id);
-let identity, current, configurations = [], operations = [], loading = false;
+let identity, current, configurations = [], operations = [], devices = [], selectedDeviceId, loading = false;
 const editors = new Map();
 const when = (date) => date ? new Date(date).toLocaleString() : '—';
 const active = (record) => ['queued', 'running', 'cancelling'].includes(record?.status);
 const periodLabel = (period) => ({ '30min': '30 minutes', '1h': '1 hour', '4h': '4 hours' }[period] || period);
-const scheduleApplied = () => current?.scheduleStatus === 'applied' && current.appliedScheduleRevision === current.scheduleRevision;
+const scheduleApplied = (record = current) => record?.scheduleStatus === 'applied' && record.appliedScheduleRevision === record.scheduleRevision;
+const profileDevice = (profile) => identity?.devicesEnabled ? devices.find((device) => device.id === profile.deviceId) : current;
+const selectedDevice = () => identity?.devicesEnabled ? devices.find((device) => device.id === selectedDeviceId) : current;
+const contextKey = (value) => `${value?.userId || value?.email || ''}:${value?.workspaceId || 'legacy'}`;
+const preferenceKey = () => identity?.workspaceId ? `expanded-configurations:${contextKey(identity)}` : 'expanded-configurations';
+function clearPrivateData() {
+  current = undefined; configurations = []; operations = []; devices = []; selectedDeviceId = undefined;
+  editors.clear(); expanded.clear(); $('configuration-list').replaceChildren(); $('runs').replaceChildren();
+  $('qr').hidden = true; $('qr').removeAttribute('src'); $('device-picker').replaceChildren();
+  $('account').textContent = ''; $('notice').textContent = ''; $('notice').hidden = true;
+  $('configurations-status').textContent = ''; $('new-device-form').reset(); deviceCreationKey = crypto.randomUUID();
+  for (const id of ['auth', 'verified', 'next', 'schedule', 'queue', 'oldest', 'pair-status', 'pair-detail', 'device-state']) $(id).textContent = '';
+  for (const id of ['run-all', 'pair', 'cancel', 'add-configuration', 'add-device', 'remove-device']) $(id).disabled = true;
+}
+function acceptIdentity(value) {
+  const changed = identity && contextKey(identity) !== contextKey(value);
+  if (changed) clearPrivateData();
+  const initial = !identity;
+  identity = value;
+  $('account').textContent = value.workspaceName ? `${value.email} · ${value.workspaceName}` : value.email;
+  if (initial || changed) {
+    try { expanded = new Set(JSON.parse(localStorage.getItem(preferenceKey()) || '[]')); } catch { expanded = new Set(); }
+  }
+  return changed;
+}
 let expanded = new Set();
 try { expanded = new Set(JSON.parse(localStorage.getItem('expanded-configurations') || '[]')); } catch { /* Defaults work without storage. */ }
 function notice(message, error = false) { $('notice').textContent = message; $('notice').className = error ? 'error' : ''; $('notice').hidden = false; }
@@ -21,12 +45,20 @@ function runDetail(row) {
   return 'No report sent. No new messages matched the filters and history window.';
 }
 async function api(path, method = 'GET', body) {
+  if (method !== 'GET' && identity) {
+    const session = await fetch('/api/session', { credentials: 'same-origin', cache: 'no-store' });
+    if (!session.ok) { clearPrivateData(); throw new Error('Sign in again before making changes.'); }
+    if (acceptIdentity(await session.json())) throw new Error('Your workspace changed. Review it before making changes.');
+  }
+  const requestContext = contextKey(identity);
   const response = await fetch(`/api/${path}`, { method, credentials: 'same-origin', cache: 'no-store',
-    headers: method === 'GET' ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': identity.csrf },
+    headers: { ...(identity?.workspaceId && path !== 'session' ? { 'X-Workspace-Id': identity.workspaceId } : {}),
+      ...(method === 'GET' ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': identity.csrf }) },
     ...(body ? { body: JSON.stringify(body) } : {}) });
   const value = await response.json();
+  if (path !== 'session' && requestContext !== contextKey(identity)) throw new Error('Your workspace changed. Refresh to continue.');
   if (!response.ok) {
-    if (response.status === 403) identity = await fetch('/api/session', { cache: 'no-store' }).then((r) => r.json());
+    if (path === 'session' || [401, 403].includes(response.status)) clearPrivateData();
     throw new Error(value.error || 'Request failed.');
   }
   return value;
@@ -38,6 +70,7 @@ function route() {
   const id = ['overview', 'configurations', 'device-connection'].includes(page) ? page : 'overview';
   document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== id; });
   document.querySelectorAll('nav a').forEach((el) => el.classList.toggle('active', el.hash === `#${id}`));
+  if (identity?.devicesEnabled && current) renderDevices();
   openLinkedConfiguration(true);
   refresh().catch((error) => notice(error.message, true));
 }
@@ -57,16 +90,21 @@ function fillForm(editor, profile) {
   fields.name.value = profile.name;
   fields.enabled.checked = profile.enabled;
   fields.timezone.value = profile.timezone;
+  editor.article.querySelector('.configuration-device').hidden = !identity?.devicesEnabled;
+  fields.deviceId.replaceChildren(...devices.map((device) => new Option(device.name, device.id)));
+  fields.deviceId.value = profile.deviceId || '';
+  fields.deviceId.disabled = editor.id !== 'draft';
   for (const [key, value] of Object.entries(profile.settings)) {
     if (fields[key]) fields[key].value = Array.isArray(value) ? value.join('\n') : value;
   }
 }
 function scheduleState(profile) {
-  if (current.maintenance) return ['Paused for linking', 'Scheduled runs are paused while you link a device.'];
-  if (current.scheduleStatus === 'error') return ['Update failed', 'Schedule update failed. Retry schedule update to apply your saved changes.'];
-  if (current.scheduleStatus !== 'applied' || current.appliedScheduleRevision !== current.scheduleRevision) return ['Update pending', 'Saved schedule changes are not confirmed yet.'];
+  const device = profileDevice(profile);
+  if (device?.maintenance) return ['Paused for linking', 'Scheduled runs are paused while you link this device.'];
+  if (device?.scheduleStatus === 'error') return ['Update failed', 'Schedule update failed. Retry schedule update to apply your saved changes.'];
+  if (!scheduleApplied(device)) return ['Update pending', 'Saved schedule changes are not confirmed yet.'];
   if (!profile.enabled) return ['Paused', 'Scheduled runs are paused. Run now is still available.'];
-  if (current.authStatus !== 'linked') return ['Needs pairing', 'Link your device before enabling scheduled runs.'];
+  if (device?.authStatus !== 'linked') return ['Needs pairing', 'Link this device before enabling scheduled runs.'];
   return [`Every ${periodLabel(profile.settings.period)}`, `Scheduled runs are enabled (${profile.timezone}). Next run: ${when(profile.nextRunAt)}.`];
 }
 function renderEditor(editor, profile) {
@@ -74,14 +112,15 @@ function renderEditor(editor, profile) {
   const draft = editor.id === 'draft';
   const [label, savedDetail] = draft ? ['Not saved', 'Save this configuration before running it.'] : scheduleState(profile);
   editor.article.querySelector('.configuration-name').textContent = profile.name;
-  editor.article.querySelector('.configuration-summary').textContent = `${profile.settings.filters.length ? profile.settings.filters.join(', ') : 'All chats'} · ${periodLabel(profile.settings.period)} · ${profile.timezone}`;
+  const device = profileDevice(profile);
+  editor.article.querySelector('.configuration-summary').textContent = `${device?.name ? `${device.name} · ` : ''}${profile.settings.filters.length ? profile.settings.filters.join(', ') : 'All chats'} · ${periodLabel(profile.settings.period)} · ${profile.timezone}`;
   editor.article.querySelector('.configuration-badge').textContent = label;
   let detail = savedDetail;
   if (!draft && editor.version !== profile.version) detail += ' This configuration changed elsewhere. Reload before saving.';
   if (editor.form.elements.enabled.checked !== profile.enabled) detail += ` Save configuration to ${editor.form.elements.enabled.checked ? 'enable' : 'pause'} scheduled runs.`;
   editor.article.querySelector('.configuration-schedule').textContent = detail;
-  const busy = operations.some(active) || current.maintenance;
-  editor.article.querySelector('.run-configuration').disabled = draft || busy || current.authStatus !== 'linked' || !scheduleApplied();
+  const busy = operations.some((row) => active(row) && (!identity?.devicesEnabled || row.deviceId === profile.deviceId)) || device?.maintenance;
+  editor.article.querySelector('.run-configuration').disabled = draft || busy || device?.authStatus !== 'linked' || !scheduleApplied(device);
   editor.article.querySelector('.remove-configuration').disabled = !draft && busy;
   editor.article.querySelector('.reconcile-configuration').hidden = draft;
   editor.article.querySelector('.reload-configuration').hidden = draft;
@@ -103,10 +142,13 @@ function createEditor(profile, draft = false) {
   link.href = `#configurations/${id}`;
   editor.details.addEventListener('toggle', () => {
     if (editor.details.open) expanded.add(id); else expanded.delete(id);
-    try { localStorage.setItem('expanded-configurations', JSON.stringify([...expanded].filter((item) => item !== 'draft'))); } catch { /* Optional preference. */ }
+    try { localStorage.setItem(preferenceKey(), JSON.stringify([...expanded].filter((item) => item !== 'draft'))); } catch { /* Optional preference. */ }
     if (!editor.details.open && location.hash === `#configurations/${id}`) history.replaceState(null, '', '#configurations');
   });
   fillForm(editor, profile);
+  editor.form.elements.deviceId.addEventListener('change', () => {
+    if (draft) { editor.profile = { ...editor.profile, deviceId: editor.form.elements.deviceId.value }; renderEditor(editor, editor.profile); }
+  });
   editor.form.elements.enabled.addEventListener('change', () => renderEditor(editor, editor.profile));
   editor.form.onsubmit = (event) => {
     event.preventDefault();
@@ -116,6 +158,7 @@ function createEditor(profile, draft = false) {
       for (const name of ['filters', 'phones']) settings[name] = fields[name].value.split('\n').map((value) => value.trim()).filter(Boolean);
       for (const name of ['summaryConcurrency', 'defaultLookbackHours']) settings[name] = Number(fields[name].value);
       const body = { name: fields.name.value, enabled: fields.enabled.checked, timezone: fields.timezone.value, settings,
+        ...(identity.devicesEnabled ? { deviceId: fields.deviceId.value } : {}),
         ...(!draft ? { baseVersion: editor.version } : { idempotencyKey: editor.idempotencyKey }) };
       const value = await api(draft ? 'configurations' : `configurations/${id}`, draft ? 'POST' : 'PUT', body);
       if (draft) { editor.article.remove(); editors.delete('draft'); }
@@ -150,11 +193,32 @@ function createEditor(profile, draft = false) {
   renderEditor(editor, profile);
   return editor;
 }
+function renderDevices() {
+  $('workspace-devices').hidden = false;
+  const previous = selectedDeviceId;
+  const link = location.hash.match(/^#device-connection\/([a-z0-9-]{1,60})$/);
+  selectedDeviceId = link ? devices.find((device) => device.id === link[1])?.id
+    : devices.some((device) => device.id === selectedDeviceId) ? selectedDeviceId : devices[0]?.id;
+  if (previous !== selectedDeviceId || !selectedDeviceId) {
+    $('qr').hidden = true; $('qr').removeAttribute('src'); $('pair-detail').textContent = '';
+    $('pair-status').textContent = selectedDeviceId ? 'Ready to link' : 'Add or select a device';
+    $('cancel').disabled = true;
+  }
+  if (link && !selectedDeviceId) notice('Device not found. Select one of your devices.', true);
+  $('device-picker').replaceChildren(...devices.map((device) => new Option(device.name, device.id)));
+  $('device-picker').value = selectedDeviceId || '';
+  const device = selectedDevice();
+  $('device-state').textContent = device ? `${device.authStatus === 'linked' ? 'Linked' : 'Needs pairing'} · Last verified: ${when(device.lastVerifiedAt)}` : 'Add your first device, then configure and link it.';
+  $('add-device').disabled = devices.length >= 5;
+  $('remove-device').disabled = !device?.removable;
+}
 function applyOverview(value) {
   current = value.config;
   configurations = value.configurations;
   operations = value.operations;
-  $('auth').textContent = current.authStatus === 'linked' ? 'Linked' : 'Needs pairing';
+  devices = value.devices || [];
+  if (identity?.devicesEnabled) renderDevices();
+  $('auth').textContent = identity?.devicesEnabled ? `${devices.filter((device) => device.authStatus === 'linked').length}/${devices.length} devices linked` : current.authStatus === 'linked' ? 'Linked' : 'Needs pairing';
   $('verified').textContent = `Last verified: ${when(current.lastVerifiedAt)}`;
   $('next').textContent = `Next scheduled run: ${when(value.nextRunAt)}`;
   const enabled = configurations.filter((item) => item.enabled).length;
@@ -162,11 +226,12 @@ function applyOverview(value) {
     : !scheduleApplied() ? 'Update pending' : `${enabled} enabled · ${configurations.length} total`;
   $('queue').textContent = current.queueCount ?? '—';
   $('oldest').textContent = current.queueOldestAt ? `Oldest message: ${when(current.queueOldestAt)}` : 'Updated after runs. Each configuration keeps its own queue.';
-  const busy = operations.some(active) || current.maintenance;
-  $('run-all').disabled = !configurations.length || busy || current.authStatus !== 'linked' || !scheduleApplied();
-  $('add-configuration').disabled = configurations.length >= 20 || editors.has('draft');
-  $('pair').disabled = busy;
-  $('pair').textContent = current.authStatus === 'linked' ? 'Re-link device' : 'Link device';
+  const device = selectedDevice();
+  const busy = operations.some((row) => active(row) && (!identity?.devicesEnabled || row.deviceId === selectedDeviceId)) || device?.maintenance;
+  $('run-all').disabled = !configurations.length || (!identity?.devicesEnabled && (busy || current.authStatus !== 'linked' || !scheduleApplied()));
+  $('add-configuration').disabled = editors.has('draft') || (identity?.devicesEnabled ? !devices.some((item) => configurations.filter((profile) => profile.deviceId === item.id).length < 20) : configurations.length >= 20);
+  $('pair').disabled = !device || busy;
+  $('pair').textContent = device?.authStatus === 'linked' ? 'Re-link device' : 'Link device';
   $('configurations-status').textContent = 'Run all runs every saved configuration, including paused schedules. Unsaved edits are not used.';
   for (const [id, editor] of editors) if (id !== 'draft' && !configurations.some((item) => item.id === id)) { editor.article.remove(); editors.delete(id); }
   for (const profile of configurations) {
@@ -179,7 +244,8 @@ function applyOverview(value) {
   for (const row of operations) {
     const names = row.configurationIds?.map((id) => row.configurationResults?.find((item) => item.configurationId === id)?.name || configurations.find((item) => item.id === id)?.name || 'Removed configuration');
     const tr = document.createElement('tr');
-    for (const text of [when(row.createdAt), row.mode === 'pair' ? 'Pairing' : 'Summary', row.mode === 'pair' ? 'Device' : names?.join(', ') || 'Default configuration', row.status, runDetail(row)]) {
+    const label = row.mode === 'pair' ? row.deviceName || 'Device' : `${row.deviceName ? `${row.deviceName} · ` : ''}${names?.join(', ') || 'Default configuration'}`;
+    for (const text of [when(row.createdAt), row.mode === 'pair' ? 'Pairing' : 'Summary', label, row.status, runDetail(row)]) {
       const td = document.createElement('td'); td.textContent = text; tr.append(td);
     }
     $('runs').append(tr);
@@ -190,13 +256,16 @@ async function refresh() {
   if (loading || document.hidden) return;
   loading = true;
   try {
+    acceptIdentity(await api('session'));
     applyOverview(await api('overview'));
-    if (location.hash === '#device-connection' || current.maintenance) {
-      const pair = await api('pairing');
+    if ((location.hash.startsWith('#device-connection') || current.maintenance) && selectedDevice()) {
+      const requestedDevice = selectedDeviceId;
+      const pair = await api(identity.devicesEnabled ? `pairing?deviceId=${encodeURIComponent(selectedDeviceId)}` : 'pairing');
+      if (requestedDevice !== selectedDeviceId || document.hidden) return;
       const syncing = pair?.status === 'running' && pair.stage === 'synchronize';
       $('pair-status').textContent = syncing ? 'Saving initial messages…' : pair ? ({ succeeded: 'Device linked', failed: 'Pairing failed', cancelled: 'Pairing cancelled', queued: 'Starting pairing…', running: 'Scan the QR code', cancelling: 'Cancelling…' }[pair.status] || pair.status) : 'Ready to link';
       $('pair-detail').textContent = pair?.error || pair?.launchError || (syncing ? 'The QR was scanned. Keep WhatsApp open while messages and session keys are saved.' : active(pair) ? 'The QR updates automatically. Pairing expires after five minutes.' : '');
-      $('cancel').disabled = !active(pair) || pair.owner !== identity.email;
+      $('cancel').disabled = !active(pair) || pair.owner !== (identity.devicesEnabled ? identity.userId : identity.email);
       $('qr').hidden = !pair?.qrDataUrl;
       if (pair?.qrDataUrl) $('qr').src = pair.qrDataUrl; else $('qr').removeAttribute('src');
     }
@@ -210,7 +279,10 @@ async function action(button, work) {
 $('add-configuration').onclick = () => {
   if (editors.has('draft') || !current) return;
   const base = configurations[0];
+  const deviceId = identity.devicesEnabled ? devices.find((device) => configurations.filter((item) => item.deviceId === device.id).length < 20)?.id : undefined;
+  if (identity.devicesEnabled && !deviceId) return;
   const editor = createEditor({ name: 'New configuration', enabled: false,
+    ...(deviceId ? { deviceId } : {}),
     timezone: base?.timezone || 'Europe/Istanbul', settings: { ...(base?.settings || current.settings), systemInstruction: '' } }, true);
   $('add-configuration').disabled = true;
   $('configurations-empty').hidden = true;
@@ -218,18 +290,36 @@ $('add-configuration').onclick = () => {
   editor.form.elements.name.focus(); editor.form.elements.name.select();
 };
 $('run-all').onclick = () => action($('run-all'), async () => {
-  await api('configurations/run-all', 'POST', { idempotencyKey: crypto.randomUUID() });
-  notice('Run requested for all configurations. Track the results in Overview.');
+  const result = await api('configurations/run-all', 'POST', { idempotencyKey: crypto.randomUUID() });
+  const rejected = result.devices?.filter((device) => device.status === 'rejected') || [];
+  notice(rejected.length ? `${result.devices.length - rejected.length} devices queued. ${rejected.length} could not start: ${rejected.map((item) => item.error).join(' ')}` : 'Run requested for all configurations. Track the results in Overview.', rejected.length > 0);
 });
 $('pair').onclick = () => action($('pair'), async () => {
-  if (current.authStatus === 'linked' && !confirm('Re-link this device? Scheduled runs will remain paused until you enable your configurations again. Pending messages are preserved.')) return;
-  await api('pairing', 'POST', { idempotencyKey: crypto.randomUUID() }); notice('Pairing requested. Waiting for the QR code.');
+  if (selectedDevice()?.authStatus === 'linked' && !confirm('Re-link this device? Scheduled runs will remain paused until you enable its configurations again. Pending messages are preserved.')) return;
+  await api('pairing', 'POST', { idempotencyKey: crypto.randomUUID(), ...(identity.devicesEnabled ? { deviceId: selectedDeviceId } : {}) }); notice('Pairing requested. Waiting for the QR code.');
 });
-$('cancel').onclick = () => action($('cancel'), async () => { await api('pairing/cancel', 'POST', {}); notice('Pairing cancelled. Scheduled runs remain paused.'); });
+$('cancel').onclick = () => action($('cancel'), async () => { await api('pairing/cancel', 'POST', identity.devicesEnabled ? { deviceId: selectedDeviceId } : {}); notice('Pairing cancelled. Scheduled runs remain paused.'); });
+$('device-picker').onchange = () => { location.hash = `#device-connection/${$('device-picker').value}`; };
+let deviceCreationKey = crypto.randomUUID();
+$('new-device-form').onsubmit = (event) => {
+  event.preventDefault();
+  action($('add-device'), async () => {
+    const result = await api('devices', 'POST', { name: $('new-device-name').value, idempotencyKey: deviceCreationKey });
+    deviceCreationKey = crypto.randomUUID(); $('new-device-form').reset();
+    selectedDeviceId = result.id; applyOverview(result); location.hash = `#device-connection/${result.id}`;
+    notice('Device added. Add a configuration and link this device.');
+  });
+};
+$('remove-device').onclick = () => action($('remove-device'), async () => {
+  const device = selectedDevice();
+  if (!device || !confirm(`Remove unused device “${device.name}”?`)) return;
+  const result = await api(`devices/${device.id}`, 'DELETE', { baseVersion: device.version });
+  selectedDeviceId = undefined; location.hash = '#device-connection'; applyOverview(result); notice('Device removed.');
+});
 window.addEventListener('hashchange', route);
 document.addEventListener('visibilitychange', () => { if (document.hidden) { $('qr').hidden = true; $('qr').removeAttribute('src'); } else refresh().catch((error) => notice(error.message, true)); });
 async function initialize() {
-  identity = await api('session'); $('account').textContent = identity.email;
+  acceptIdentity(await api('session'));
   route();
   setInterval(() => refresh().catch((error) => notice(error.message, true)), 4000);
 }

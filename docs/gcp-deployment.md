@@ -1,5 +1,9 @@
 # GCP deployment
 
+This guide covers the original shared-account deployment. For private user
+workspaces and migration, use [the workspace rollout guide](gcp-workspaces.md).
+After workspace cutover, `pnpm deploy:gcp` refuses to restore legacy access.
+
 This implements [ADR-0001](adr/0001-gcp-scheduled-execution.md). Deployment creates
 dedicated bot resources in the configured GCP project and region and initializes
 new accounts with scheduling paused.

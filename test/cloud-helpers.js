@@ -7,18 +7,23 @@ export class MemoryFirestore {
     return { path, id: path.split('/').at(-1),
       get: async () => db.snapshot(path),
       collection: (name) => db.collection(`${path}/${name}`),
+      listCollections: async () => [...new Set([...db.records.keys()].filter((key) => key.startsWith(`${path}/`))
+        .map((key) => key.slice(path.length + 1).split('/')[0]))].map((name) => db.collection(`${path}/${name}`)),
       set: (data, options) => db.runTransaction((tx) => tx.set(db.doc(path), data, options)),
       update: (data) => db.runTransaction((tx) => tx.update(db.doc(path), data)),
       delete: () => db.runTransaction((tx) => tx.delete(db.doc(path))),
     };
   }
-  snapshot(path) { return { exists: this.records.has(path), data: () => structuredClone(this.records.get(path)), ref: this.doc(path) }; }
-  collection(path, sort, limit = Infinity) {
+  snapshot(path) { return { id: path.split('/').at(-1), exists: this.records.has(path), data: () => structuredClone(this.records.get(path)), ref: this.doc(path) }; }
+  collection(path, sort, limit = Infinity, filters = []) {
     return { doc: (id) => this.doc(`${path}/${id}`),
-      orderBy: (field, direction) => this.collection(path, [field, direction], limit),
-      limit: (count) => this.collection(path, sort, count),
+      orderBy: (field, direction) => this.collection(path, [field, direction], limit, filters),
+      limit: (count) => this.collection(path, sort, count, filters),
+      where: (field, operator, value) => this.collection(path, sort, limit, [...filters, [field, operator, value]]),
       get: async () => {
         let docs = [...this.records.keys()].filter((p) => p.startsWith(`${path}/`) && p.split('/').length === path.split('/').length + 1).map((p) => this.snapshot(p));
+        docs = docs.filter((doc) => filters.every(([field, operator, value]) => operator === '==' ? doc.data()[field] === value
+          : operator === 'in' ? value.includes(doc.data()[field]) : (() => { throw new Error('Unsupported query'); })()));
         if (sort) docs.sort((a, b) => String(a.data()[sort[0]]).localeCompare(String(b.data()[sort[0]])) * (sort[1] === 'desc' ? -1 : 1));
         return { docs: docs.slice(0, limit) };
       },

@@ -14,6 +14,7 @@ export function configurationsOf(account) {
   if (Array.isArray(account.configurations)) return account.configurations;
   return [Object.fromEntries(Object.entries({ id: DEFAULT_CONFIGURATION_ID, name: 'Default configuration', version: account.activeVersion,
     enabled: account.enabled, timezone: account.timezone, settings: { ...account.settings, period: canonicalPeriod(account.settings.period) },
+    ...(account.workspaceId ? { workspaceId: account.workspaceId, deviceId: account.deviceId } : {}),
     createdAt: account.createdAt, queueCount: account.queueCount, queueOldestAt: account.queueOldestAt,
     lastSuccessfulRunAt: account.lastSuccessfulRunAt }).filter(([, value]) => value !== undefined))];
 }
@@ -38,6 +39,7 @@ export function withConfigurations(account, configurations) {
 
 export function configurationSnapshot(account) {
   return { enabled: account.enabled, timezone: account.timezone, settings: account.settings,
+    ...(account.workspaceId ? { workspaceId: account.workspaceId, deviceId: account.deviceId } : {}),
     ...(account.configurations ? { configurations: account.configurations } : {}) };
 }
 

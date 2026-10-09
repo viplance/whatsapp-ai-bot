@@ -23,7 +23,7 @@ const summaryTotals = (results) => results.reduce((total, item) => {
 export async function runCloudWorker({ mode, env = cloudEnvironment(), variables = process.env,
   controlDb = new Firestore({ projectId: env.projectId, databaseId: env.controlDatabase }),
   runtimeDb = new Firestore({ projectId: env.projectId, databaseId: env.runtimeDatabase }),
-  sessionFactory = connectSession, summarizeFactory = createSummarizer, log = logWorkerEvent } = {}) {
+  sessionFactory = connectSession, summarizeFactory = createSummarizer, verifyAccount, log = logWorkerEvent } = {}) {
   const restoreConsole = silenceDependencyConsole();
   const beganAt = Date.now();
   let phase = 'configuration';
@@ -32,7 +32,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
   const opRef = ref.collection('operations').doc(id);
   const pairing = mode === 'pair';
   const requested = (variables.CONFIGURATION_IDS || '').split(',').filter(Boolean);
-  const manual = requested.length > 0;
+  const manual = requested.length > 0 && variables.SCHEDULED_REQUEST !== 'true';
   const controller = new AbortController();
   const stop = () => controller.abort(new Error('Shutdown requested'));
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
@@ -42,7 +42,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
   const executionName = variables.CLOUD_RUN_EXECUTION ? `projects/${env.projectId}/locations/${env.region}/jobs/${pairing ? env.pairingJob : env.summaryJob}/executions/${variables.CLOUD_RUN_EXECUTION}` : null;
   const runnable = (record) => !record || ['queued', 'running'].includes(record.status)
     || (!pairing && Number(variables.CLOUD_RUN_TASK_ATTEMPT) > 0 && record.status === 'failed' && record.execution === executionName);
-  const eligible = (cfg) => cfg && (pairing ? cfg.maintenance && cfg.latestPairing === id
+  const eligible = (cfg) => cfg && !cfg.migrationWorkspace && (pairing ? cfg.maintenance && cfg.latestPairing === id
     : (cfg.enabled || manual) && !cfg.maintenance && cfg.authStatus === 'linked'
       && (manual || String(cfg.scheduleRevision) === String(variables.SCHEDULE_REVISION))
       && (!cfg.activeOperation || cfg.activeOperation === id));
@@ -75,6 +75,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
 
   try {
     let cfg = (await ref.get()).data();
+    if (env.workspaceId && (cfg?.workspaceId !== env.workspaceId || cfg.deviceId !== env.configId)) throw new Error('Invalid device ownership');
     if (!eligible(cfg)) return { skipped: true };
     const previous = (await opRef.get()).data();
     if (!runnable(previous)) return { skipped: true };
@@ -93,7 +94,8 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
       const latest = (await tx.get(ref)).data();
       const record = (await tx.get(opRef)).data();
       if (!eligible(latest) || !runnable(record)) throw new Error('Operation no longer eligible');
-      if (manual && (!record?.configurationIds || record.configurationIds.join(',') !== requested.join(','))) throw new Error('Run selection is not authorized');
+      if (env.workspaceId && (record?.workspaceId !== env.workspaceId || record.deviceId !== env.configId || record.mode !== mode)) throw new Error('Invalid operation ownership');
+      if (requested.length && (!record?.configurationIds || record.configurationIds.join(',') !== requested.join(','))) throw new Error('Run selection is not authorized');
       const due = !pairing && !manual && latest.configurations ? dueConfigurations(latest) : configurationsOf(latest);
       const configurationIds = record?.configurationIds || due.map((item) => item.id);
       if (!pairing && !configurationIds.length) throw new Error('No configurations are due');
@@ -111,6 +113,8 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
     if (!version) throw new Error('Active configuration version is missing');
     const snapshotProfiles = configurationsOf({ ...version, activeVersion: operation.configVersion });
     const profiles = [...snapshotProfiles, ...configurationsOf(cfg).filter((item) => !snapshotProfiles.some((snapshot) => snapshot.id === item.id))];
+    if (env.workspaceId && (version.workspaceId !== env.workspaceId || version.deviceId !== env.configId
+      || profiles.some((item) => item.workspaceId !== env.workspaceId || item.deviceId !== env.configId))) throw new Error('Invalid snapshot ownership');
     const selected = pairing ? [] : operation.configurationIds.map((configurationId) => {
       const profile = profiles.find((item) => item.id === configurationId);
       if (!profile) throw new Error('Run configuration is missing');
@@ -122,6 +126,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
     const account = runtimeDb.doc(`accounts/${env.configId}`);
     phase = 'restore';
     const current = (await account.get()).data();
+    if (env.workspaceId && current && (current.workspaceId !== env.workspaceId || current.deviceId !== env.configId)) throw new Error('Invalid session ownership');
     const generation = pairing ? id : current?.activeGeneration;
     if (!generation) throw new NeedsPairingError();
     const auth = await createFirestoreAuth({ db: runtimeDb, configId: env.configId, generation, lease });
@@ -130,6 +135,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
         lease, defaultLookbackMs: build(profile).defaultLookbackMs }) })));
     phase = 'connect';
     session = sessionFactory({ auth, config, store: stores[0]?.store,
+      ...(verifyAccount ? { verifyAccount } : {}),
       ...(cfg.configurations ? { collectionTargets: stores.map((entry) => ({ id: entry.profile.id, config: entry.config, store: entry.store })) } : {}),
       signal: controller.signal, pairing, onDiagnostic: (event) => log({ ...event, id, phase }),
       onQr: async (qr) => {
@@ -138,6 +144,7 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
       },
     });
     const socket = await session.ready();
+    if (verifyAccount) await verifyAccount(socket.user?.id || auth.state.creds.me?.id);
     controller.signal.throwIfAborted();
     phase = 'synchronize';
     if (pairing) {
@@ -150,7 +157,8 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
       phase = 'pair-commit';
       if ((await opRef.get()).data().status !== 'running') throw new Error('Pairing cancelled');
       await auth.flush();
-      await lease.write((tx) => tx.set(account, { activeGeneration: generation }, { merge: true }));
+      await lease.write((tx) => tx.set(account, { activeGeneration: generation,
+        ...(env.workspaceId ? { workspaceId: env.workspaceId, deviceId: env.configId } : {}) }, { merge: true }));
       await ref.update({ authStatus: 'linked', lastVerifiedAt: iso() });
     } else {
       phase = 'summary-delivery';
@@ -239,6 +247,10 @@ export async function runCloudWorker({ mode, env = cloudEnvironment(), variables
 if (process.argv[1]?.endsWith('/cloud/worker.js')) {
   silenceDependencyConsole();
   const mode = process.argv.includes('--pair') ? 'pair' : 'summary';
-  try { await runCloudWorker({ mode }); }
+  try {
+    const env = cloudEnvironment();
+    if (env.workspaceId) { const { runWorkspaceWorker } = await import('./workspace-worker.js'); await runWorkspaceWorker({ mode, env, worker: runCloudWorker }); }
+    else await runCloudWorker({ mode, env });
+  }
   catch { process.exitCode = 1; }
 }

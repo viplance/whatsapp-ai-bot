@@ -9,6 +9,7 @@ export class NeedsPairingError extends Error { constructor() { super('WhatsApp a
 
 // No scan interval or background reconnect loop: the caller owns the deadline.
 export function connectSession({ auth, config, store, collectionTargets, signal, pairing = false,
+  verifyAccount,
   onQr = async () => {}, socketFactory = makeWASocket,
   getVersion = fetchLatestWaWebVersion, syncWaitMs = 75000, onDiagnostic = () => {} }) {
   const controller = new AbortController();
@@ -41,8 +42,12 @@ export function connectSession({ auth, config, store, collectionTargets, signal,
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   ready.catch(() => {});
   const history = new Promise((resolve) => { historyResolve = resolve; });
+  let verifiedResolve, verifiedReject;
+  const verified = verifyAccount ? new Promise((resolve, reject) => { verifiedResolve = resolve; verifiedReject = reject; }) : Promise.resolve();
+  verified.catch(() => {});
   function fail(error) {
     failure ||= error;
+    verifiedReject?.(error);
     readyReject(error);
     controller.abort(error);
   }
@@ -52,6 +57,7 @@ export function connectSession({ auth, config, store, collectionTargets, signal,
     return operation;
   }
   combined.addEventListener('abort', () => {
+    verifiedReject?.(combined.reason);
     readyReject(combined.reason);
     socket?.end?.(new Error('Session stopped'));
   }, { once: true });
@@ -79,7 +85,11 @@ export function connectSession({ auth, config, store, collectionTargets, signal,
       if (event.connection === 'open') {
         onDiagnostic({ event: 'whatsapp_connected' });
         opened = true;
-        void enqueue(async () => { await auth.saveCreds(); await auth.flush?.(); readyResolve(sock); });
+        void Promise.resolve().then(async () => {
+          if (verifyAccount) await verifyAccount(sock.user?.id || auth.state.creds.me?.id);
+          verifiedResolve?.();
+          return enqueue(async () => { await auth.saveCreds(); await auth.flush?.(); readyResolve(sock); });
+        }).catch(fail);
       }
       if (event.connection === 'close') {
         const status = event.lastDisconnect?.error?.output?.statusCode;
@@ -98,12 +108,12 @@ export function connectSession({ auth, config, store, collectionTargets, signal,
     sock.ev.on('groups.update', (groups) => { if (current()) groups.forEach((g) => rememberGroup(g.id, g.subject)); });
     sock.ev.on('messages.upsert', (event) => {
       if (!current() || !['notify', 'append'].includes(event.type)) return;
-      void enqueue(() => ingest(event.messages, { sock, history: event.type === 'append' }));
+      void verified.then(() => enqueue(() => ingest(event.messages, { sock, history: event.type === 'append' }))).catch(fail);
     });
     sock.ev.on('messaging-history.set', (event) => {
       if (!current()) return;
       metrics.historyEvents++;
-      void enqueue(async () => {
+      void verified.then(() => enqueue(async () => {
         for (const contact of event.contacts || []) rememberContact(contact);
         for (const chat of event.chats || []) if (chat.name) rememberGroup(chat.id, chat.name);
         await ingest(event.messages, { sock, history: true });
@@ -112,7 +122,7 @@ export function connectSession({ auth, config, store, collectionTargets, signal,
           metrics.historyComplete = true;
           historyResolve();
         }
-      });
+      })).catch(fail);
     });
   }
   // The bundled Web revision can be rejected before WhatsApp issues a QR.

@@ -1,7 +1,7 @@
 import { GoogleAuth } from 'google-auth-library';
 import { scheduleFor } from './settings.js';
 
-export function createGoogleApi({ env, auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }) }) {
+export function createGoogleApi({ env, auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] }), fixed = false }) {
   const jobPath = (mode) => `projects/${env.projectId}/locations/${env.region}/jobs/${mode === 'pair' ? env.pairingJob : env.summaryJob}`;
   const schedulerPath = `projects/${env.projectId}/locations/${env.region}/jobs/${env.schedulerJob}`;
   async function request(url, method = 'GET', data) {
@@ -10,12 +10,15 @@ export function createGoogleApi({ env, auth = new GoogleAuth({ scopes: ['https:/
   }
   return {
     async start(mode, values) {
-      const data = { overrides: { containerOverrides: [{ env: Object.entries(values).map(([name, value]) => ({ name, value: String(value) })) }] } };
+      if (!['summary', 'pair'].includes(mode)) throw new Error('Invalid Job mode');
+      const data = fixed ? {} : { overrides: { containerOverrides: [{ env: Object.entries(values).map(([name, value]) => ({ name, value: String(value) })) }] } };
       const operation = await request(`https://run.googleapis.com/v2/${jobPath(mode)}:run`, 'POST', data);
       return { operation: operation.name, execution: operation.metadata?.name || operation.response?.name || null };
     },
     async execution(record) {
       let name = record.execution;
+      if (fixed && name && !name.startsWith(`${jobPath(record.mode)}/executions/`)) throw new Error('Execution is outside the workspace Job');
+      if (fixed && !name) return null;
       if (!name && record.operation) {
         const op = await request(`https://run.googleapis.com/v2/${record.operation}`);
         name = op.metadata?.name || op.response?.name;
@@ -29,6 +32,7 @@ export function createGoogleApi({ env, auth = new GoogleAuth({ scopes: ['https:/
       return Boolean(execution?.name);
     },
     async reconcile(config) {
+      if (fixed) throw new Error('Workspace Jobs do not manage Scheduler');
       const body = { name: schedulerPath, schedule: scheduleFor(config.settings.period), timeZone: config.timezone,
         attemptDeadline: '30s', retryConfig: { retryCount: 1, minBackoffDuration: '10s', maxBackoffDuration: '60s' },
         httpTarget: { uri: `https://run.googleapis.com/v2/${jobPath('summary')}:run`, httpMethod: 'POST',

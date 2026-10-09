@@ -23,7 +23,7 @@
         <article><h2>Recent runs</h2><p class="muted">A linked device can be disconnected between runs. This is expected.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Type</th><th>Configuration</th><th>Status</th><th>Details</th></tr></thead><tbody id="runs"></tbody></table></div></article>
       </section>
       <section id="configurations" class="view" hidden>
-        <div class="heading"><div><p class="eyebrow">YOUR CONFIGURATIONS</p><h1>Configurations</h1><p class="muted">Separate filters, recipients, and schedules. One linked device.</p></div><div class="actions"><button id="run-all" disabled>Run all</button><button id="add-configuration" class="secondary">Add configuration</button></div></div>
+        <div class="heading"><div><p class="eyebrow">YOUR CONFIGURATIONS</p><h1>Configurations</h1><p class="muted">Independent filters, recipients, and schedules for your devices.</p></div><div class="actions"><button id="run-all" disabled>Run all</button><button id="add-configuration" class="secondary">Add configuration</button></div></div>
         <p id="configurations-status" class="muted"></p>
         <div id="configuration-list"></div>
         <article id="configurations-empty" hidden><h2>No configurations yet</h2><p class="muted">Add a configuration to choose chats, recipients, and a schedule.</p></article>
@@ -33,6 +33,7 @@
               <summary><span class="configuration-title"><span class="configuration-name"></span><small class="configuration-summary"></small></span><span class="configuration-badge"></span><span class="chevron" aria-hidden="true">›</span></summary>
               <form>
                 <label>Configuration name<input name="name" maxlength="100" required></label>
+                <label class="configuration-device" hidden>Device<select name="deviceId"></select><small>Saved configurations keep their assigned device.</small></label>
                 <label class="toggle"><input type="checkbox" name="enabled"> Enable scheduled runs</label>
                 <p class="muted">Run now also works when scheduling is paused. Saved changes apply to future runs.</p>
                 <div class="fields">
@@ -56,8 +57,11 @@
       </section>
       <section id="device-connection" class="view" hidden>
         <div class="heading"><div><p class="eyebrow">LINKED DEVICE</p><h1>Device connection</h1><p class="muted">Link once. Future runs reuse your saved session.</p></div></div>
+        <article id="workspace-devices" hidden><h2>Your devices</h2><label>Selected device<select id="device-picker"></select></label><p id="device-state" class="muted"></p>
+          <form id="new-device-form"><label>New device name<input id="new-device-name" maxlength="100" required placeholder="Personal WhatsApp"></label><div class="actions"><button id="add-device" type="submit">Add device</button><button id="remove-device" class="secondary" type="button">Remove unused device</button></div></form>
+        </article>
         <article class="pair-card"><h2 id="pair-status">Ready to link</h2><p>On your phone, open <b>WhatsApp → Linked devices → Link a device</b>, then scan the QR code below.</p>
-          <p class="muted">Linking pauses scheduled runs. Keep your local bot stopped. Enable your configurations on the <a href="#configurations">Configurations page</a> after linking.</p>
+          <p class="muted">Linking pauses scheduled runs for this device. Keep your local bot stopped. Enable your configurations on the <a href="#configurations">Configurations page</a> after linking.</p>
           <img id="qr" alt="Scan this QR code in WhatsApp to link the bot" width="300" height="300" hidden>
           <p id="pair-detail" class="muted"></p>
           <div class="actions"><button id="pair">Link device</button><button id="cancel" class="secondary" disabled>Cancel pairing</button></div>

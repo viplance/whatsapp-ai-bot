@@ -19,6 +19,7 @@ REPOSITORY="${GCP_REGION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/whatsapp-bot"
 IMAGE="${IMAGE:-${REPOSITORY}/bot:$(date -u +%Y%m%d%H%M%S)}"
 
 gcloud services enable run.googleapis.com firestore.googleapis.com cloudscheduler.googleapis.com iap.googleapis.com iam.googleapis.com iamcredentials.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com secretmanager.googleapis.com --project="$GOOGLE_CLOUD_PROJECT" --quiet
+node scripts/guard-legacy-deployment.js
 for database in "$CONTROL_DATABASE" "$RUNTIME_DATABASE"; do
   if ! gcloud firestore databases describe --project="$GOOGLE_CLOUD_PROJECT" --database="$database" >/dev/null 2>&1; then
     gcloud firestore databases create --project="$GOOGLE_CLOUD_PROJECT" --database="$database" --location="$GCP_REGION" --type=firestore-native --delete-protection --quiet

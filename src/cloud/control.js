@@ -14,6 +14,7 @@ export function createControl({ db, env, google }) {
   const config = async () => {
     const value = (await ref.get()).data();
     if (!value) throw new HttpError(503, 'Cloud configuration has not been initialized.');
+    if (value.migrationWorkspace) throw new HttpError(503, 'This account is being migrated.');
     return value;
   };
   async function reconcile() {
@@ -55,6 +56,7 @@ export function createControl({ db, env, google }) {
     const value = validateSettings(input);
     await db.runTransaction(async (tx) => {
       const current = (await tx.get(ref)).data();
+      if (current.migrationWorkspace) throw new HttpError(503, 'This account is being migrated.');
       if (current.configurations) throw new HttpError(409, 'Use the Configurations page to edit individual configurations.');
       if (current.activeVersion !== input.baseVersion) throw new HttpError(409, 'Settings changed. Reload before saving.');
       if (value.enabled && (current.maintenance || current.authStatus !== 'linked')) throw new HttpError(409, 'Link WhatsApp and finish maintenance before enabling runs.');
@@ -71,11 +73,13 @@ export function createControl({ db, env, google }) {
     const value = mode === 'remove' ? null : validateConfiguration(input);
     if (mode === 'create') {
       if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== 'string' || !/^[\w-]{8,100}$/.test(input.idempotencyKey))) throw new HttpError(400, 'A valid idempotency key is required.');
-      id = `config-${input.idempotencyKey ? operationId(user, 'configuration-create', input.idempotencyKey).slice(0, 32) : crypto.randomUUID()}`;
+      const scope = env.workspaceId ? `${env.workspaceId}:${env.configId}:` : '';
+      id = `config-${input.idempotencyKey ? operationId(user, scope + 'configuration-create', input.idempotencyKey).slice(0, 32) : crypto.randomUUID()}`;
     }
     await db.runTransaction(async (tx) => {
       const current = (await tx.get(ref)).data();
       if (!current) throw new HttpError(503, 'Cloud configuration has not been initialized.');
+      if (current.migrationWorkspace) throw new HttpError(503, 'This account is being migrated.');
       const items = configurationsOf(current);
       const existing = items.find((item) => item.id === id);
       if (mode === 'create' && existing) {
@@ -90,6 +94,7 @@ export function createControl({ db, env, google }) {
       if (mode === 'remove' && current.activeOperation) throw new HttpError(409, 'Wait for the active operation before removing a configuration.');
       if (mode === 'remove' && (existing.queueCount || existing.pendingReportCount)) throw new HttpError(409, 'This configuration has pending work. Run it before removing it.');
       const changes = value && { ...existing, ...value, id, version: (existing?.version || 0) + 1,
+        ...(env.workspaceId ? { workspaceId: env.workspaceId, deviceId: env.configId } : {}),
         createdAt: existing?.createdAt || iso(), updatedAt: iso(), updatedBy: user,
         ...(!existing || existing.enabled !== value.enabled || existing.timezone !== value.timezone
           || existing.settings.period !== value.settings.period ? { scheduleStartedAt: iso(), lastScheduledSlot: null } : {}) };
@@ -105,6 +110,7 @@ export function createControl({ db, env, google }) {
   async function refreshOperation(id) {
     if (!id) return null;
     const record = (await opRef(id).get()).data();
+    if (env.workspaceId && record?.status === 'queued' && (await db.doc(`requests/${id}`).get()).data()?.status === 'queued') return record;
     if (!record || !activeOperation(record) || Date.now() - Date.parse(record.updatedAt) < 20000) return record;
     try {
       const execution = await google.execution(record);
@@ -126,7 +132,8 @@ export function createControl({ db, env, google }) {
   async function start(mode, key, user, selection) {
     if (!['summary', 'pair'].includes(mode) || typeof key !== 'string' || !/^[\w-]{8,100}$/.test(key)) throw new HttpError(400, 'A valid idempotency key is required.');
     if (selection !== undefined && selection !== 'all') configurationId(selection);
-    const id = operationId(user, selection ? `${mode}:${selection}` : mode, key);
+    const scope = env.workspaceId ? `${env.workspaceId}:${env.configId}:` : '';
+    const id = operationId(user, scope + (selection ? `${mode}:${selection}` : mode), key);
     const existing = (await opRef(id).get()).data();
     if (existing) return { id, status: existing.status };
     const latest = await config();
@@ -134,6 +141,7 @@ export function createControl({ db, env, google }) {
     const result = await db.runTransaction(async (tx) => {
       const old = (await tx.get(opRef(id))).data();
       const cfg = (await tx.get(ref)).data();
+      if (cfg.migrationWorkspace) throw new HttpError(503, 'This account is being migrated.');
       const current = cfg.activeOperation ? (await tx.get(opRef(cfg.activeOperation))).data() : null;
       if (old) return { fresh: false, cfg, record: old };
       if (activeOperation(current)) throw new HttpError(409, 'Another operation is active. Wait for it to finish.');
@@ -151,8 +159,11 @@ export function createControl({ db, env, google }) {
           ...configurationSnapshot({ ...cfg, ...changes }), createdAt: iso(), createdBy: user });
       }
       const record = { id, mode, owner: user, status: 'queued', createdAt: iso(), updatedAt: iso(), qr: null,
+        ...(env.workspaceId ? { workspaceId: env.workspaceId, deviceId: env.configId } : {}),
         ...(selection ? { configurationIds: selected.map((item) => item.id), configVersion: cfg.activeVersion } : {}) };
       tx.create(opRef(id), record);
+      if (env.workspaceId) tx.create(db.doc(`requests/${id}`), { id, workspaceId: env.workspaceId,
+        deviceId: env.configId, mode, status: 'queued', attempts: 0, createdAt: record.createdAt, updatedAt: record.updatedAt });
       tx.update(ref, { ...changes, activeOperation: id });
       return { fresh: true, cfg: { ...cfg, ...changes }, record };
     });
