@@ -10,42 +10,54 @@
 <body>
   <header><div class="brand"><span class="logo">W</span><div>WhatsApp AI Bot<small>Administration</small></div></div><span id="account" class="muted"></span></header>
   <div class="layout">
-    <nav aria-label="Main"><a href="#overview">Overview</a><a href="#settings">Settings</a><a href="#device-connection">Device connection</a><p>Summaries on your schedule.<br>Your linked device stays saved between runs.</p></nav>
+    <nav aria-label="Main"><a href="#overview">Overview</a><a href="#configurations">Configurations</a><a href="#device-connection">Device connection</a><p>Summaries on your schedule.<br>Your linked device stays saved between runs.</p></nav>
     <main>
       <div id="notice" role="status" hidden></div>
       <section id="overview" class="view">
-        <div class="heading"><div><p class="eyebrow">YOUR BOT</p><h1>Overview</h1><p class="muted">Connection, schedule, and recent activity.</p></div><button id="run">Run now</button></div>
+        <div class="heading"><div><p class="eyebrow">YOUR BOT</p><h1>Overview</h1><p class="muted">Connection, schedule, and recent activity.</p></div></div>
         <div class="cards">
           <article><h2>Device connection</h2><strong id="auth">Loading…</strong><p id="verified" class="muted"></p><a href="#device-connection">Manage device →</a></article>
-          <article><h2>Schedule</h2><strong id="schedule">Loading…</strong><p id="next" class="muted"></p><a href="#settings">Edit settings →</a></article>
+          <article><h2>Configurations</h2><strong id="schedule">Loading…</strong><p id="next" class="muted"></p><a href="#configurations">Manage configurations →</a></article>
           <article><h2>Pending messages</h2><strong id="queue">—</strong><p id="oldest" class="muted">Updated after successful runs.</p></article>
         </div>
-        <article><h2>Recent runs</h2><p class="muted">A linked device can be disconnected between runs. This is expected.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Type</th><th>Status</th><th>Details</th></tr></thead><tbody id="runs"></tbody></table></div></article>
+        <article><h2>Recent runs</h2><p class="muted">A linked device can be disconnected between runs. This is expected.</p><div class="table-wrap"><table><thead><tr><th>Started</th><th>Type</th><th>Configuration</th><th>Status</th><th>Details</th></tr></thead><tbody id="runs"></tbody></table></div></article>
       </section>
-      <section id="settings" class="view" hidden>
-        <div class="heading"><div><p class="eyebrow">CONFIGURATION</p><h1>Settings</h1><p class="muted">Saved changes apply to the next run.</p></div></div>
-        <form id="settings-form"><article>
-          <label class="toggle"><input type="checkbox" name="enabled"> Enable scheduled runs</label>
-          <p class="muted">Link WhatsApp before enabling. Pausing keeps your pending messages.</p>
-          <div class="fields">
-            <label>Run every<select name="period"><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></label>
-            <label>Time zone<input name="timezone" required placeholder="Europe/Istanbul"></label>
-            <label>Quiet time<input name="waitForNoActivity" required placeholder="15min"><small>Active chats wait until a later run.</small></label>
-            <label>Gemini model<input name="model" required placeholder="gemini-3.1-flash-lite"></label>
-            <label>Concurrent summaries<input name="summaryConcurrency" type="number" min="1" max="10" required></label>
-            <label>Initial history window, hours<input name="defaultLookbackHours" type="number" min="1" required></label>
-          </div>
-          <label>Chat filters<textarea name="filters" rows="3" placeholder="One name fragment per line; empty includes every chat"></textarea><small>Matches any part of a group or contact name, ignoring case, including Turkish I/İ/ı.</small></label>
-          <label>Report recipients<textarea name="phones" rows="3" required placeholder="One international number per line, or own"></textarea></label>
-          <label>Summary instructions<textarea name="systemInstruction" rows="6" maxlength="16000"></textarea></label>
-          <div class="actions"><button type="submit">Save settings</button><button type="button" id="reload" class="secondary">Reload</button><button type="button" id="reconcile" class="secondary">Retry schedule update</button></div>
-          <p id="schedule-detail" class="muted"></p>
-        </article></form>
+      <section id="configurations" class="view" hidden>
+        <div class="heading"><div><p class="eyebrow">YOUR CONFIGURATIONS</p><h1>Configurations</h1><p class="muted">Separate filters, recipients, and schedules. One linked device.</p></div><div class="actions"><button id="run-all" disabled>Run all</button><button id="add-configuration" class="secondary">Add configuration</button></div></div>
+        <p id="configurations-status" class="muted"></p>
+        <div id="configuration-list"></div>
+        <article id="configurations-empty" hidden><h2>No configurations yet</h2><p class="muted">Add a configuration to choose chats, recipients, and a schedule.</p></article>
+        <template id="configuration-template">
+          <article class="configuration">
+            <details>
+              <summary><span class="configuration-title"><span class="configuration-name"></span><small class="configuration-summary"></small></span><span class="configuration-badge"></span><span class="chevron" aria-hidden="true">›</span></summary>
+              <form>
+                <label>Configuration name<input name="name" maxlength="100" required></label>
+                <label class="toggle"><input type="checkbox" name="enabled"> Enable scheduled runs</label>
+                <p class="muted">Run now also works when scheduling is paused. Saved changes apply to future runs.</p>
+                <div class="fields">
+                  <label>Run every<select name="period"><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></label>
+                  <label>Time zone<input name="timezone" required placeholder="Europe/Istanbul"></label>
+                  <label>Quiet time<input name="waitForNoActivity" required placeholder="15min"><small>Active chats wait until a later run.</small></label>
+                  <label>Gemini model<input name="model" required placeholder="gemini-3.1-flash-lite"></label>
+                  <label>Concurrent summaries<input name="summaryConcurrency" type="number" min="1" max="10" required></label>
+                  <label>Initial history window, hours<input name="defaultLookbackHours" type="number" min="1" required></label>
+                </div>
+                <label>Chat filters<textarea name="filters" rows="3" placeholder="One name fragment per line; empty includes every chat"></textarea><small>Matches any part of a group or contact name, ignoring case, including Turkish I/İ/ı.</small></label>
+                <label>Report recipients<textarea name="phones" rows="3" required placeholder="One international number per line, or own"></textarea></label>
+                <label>Summary instructions<textarea name="systemInstruction" rows="6" maxlength="16000"></textarea></label>
+                <div class="actions"><button type="submit">Save configuration</button><button type="button" class="reload-configuration secondary">Reload</button><button type="button" class="reconcile-configuration secondary">Retry schedule update</button></div>
+                <p class="configuration-schedule muted" role="status"></p>
+              </form>
+            </details>
+            <div class="configuration-footer"><p class="configuration-result muted"></p><div class="actions"><a class="configuration-link">Link</a><button class="run-configuration" disabled>Run now</button><button class="remove-configuration secondary">Remove</button></div></div>
+          </article>
+        </template>
       </section>
       <section id="device-connection" class="view" hidden>
         <div class="heading"><div><p class="eyebrow">LINKED DEVICE</p><h1>Device connection</h1><p class="muted">Link once. Future runs reuse your saved session.</p></div></div>
         <article class="pair-card"><h2 id="pair-status">Ready to link</h2><p>On your phone, open <b>WhatsApp → Linked devices → Link a device</b>, then scan the QR code below.</p>
-          <p class="muted">Linking pauses scheduled runs. Keep your local bot stopped. Enable the schedule in Settings after linking.</p>
+          <p class="muted">Linking pauses scheduled runs. Keep your local bot stopped. Enable your configurations on the <a href="#configurations">Configurations page</a> after linking.</p>
           <img id="qr" alt="Scan this QR code in WhatsApp to link the bot" width="300" height="300" hidden>
           <p id="pair-detail" class="muted"></p>
           <div class="actions"><button id="pair">Link device</button><button id="cancel" class="secondary" disabled>Cancel pairing</button></div>

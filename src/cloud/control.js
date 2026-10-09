@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { HttpError, nextRunAt, validateSettings } from './settings.js';
+import { configurationId, configurationsOf, configurationSnapshot, MAX_CONFIGURATIONS,
+  validateConfiguration, withConfigurations } from './configurations.js';
 
 const ACTIVE = new Set(['queued', 'running', 'cancelling']);
 export const activeOperation = (operation) => operation && ACTIVE.has(operation.status);
@@ -53,6 +55,7 @@ export function createControl({ db, env, google }) {
     const value = validateSettings(input);
     await db.runTransaction(async (tx) => {
       const current = (await tx.get(ref)).data();
+      if (current.configurations) throw new HttpError(409, 'Use the Configurations page to edit individual configurations.');
       if (current.activeVersion !== input.baseVersion) throw new HttpError(409, 'Settings changed. Reload before saving.');
       if (value.enabled && (current.maintenance || current.authStatus !== 'linked')) throw new HttpError(409, 'Link WhatsApp and finish maintenance before enabling runs.');
       const next = { ...current, ...value, activeVersion: current.activeVersion + 1,
@@ -62,6 +65,42 @@ export function createControl({ db, env, google }) {
     });
     await reconcile();
     return config();
+  }
+  async function changeConfiguration(id, input, user, mode) {
+    if (mode !== 'create') configurationId(id);
+    const value = mode === 'remove' ? null : validateConfiguration(input);
+    if (mode === 'create') {
+      if (input.idempotencyKey !== undefined && (typeof input.idempotencyKey !== 'string' || !/^[\w-]{8,100}$/.test(input.idempotencyKey))) throw new HttpError(400, 'A valid idempotency key is required.');
+      id = `config-${input.idempotencyKey ? operationId(user, 'configuration-create', input.idempotencyKey).slice(0, 32) : crypto.randomUUID()}`;
+    }
+    await db.runTransaction(async (tx) => {
+      const current = (await tx.get(ref)).data();
+      if (!current) throw new HttpError(503, 'Cloud configuration has not been initialized.');
+      const items = configurationsOf(current);
+      const existing = items.find((item) => item.id === id);
+      if (mode === 'create' && existing) {
+        if (existing.name !== value.name || existing.enabled !== value.enabled || existing.timezone !== value.timezone
+          || JSON.stringify(existing.settings) !== JSON.stringify(value.settings)) throw new HttpError(409, 'Configuration was already saved. Reload it before making further changes.');
+        return;
+      }
+      if (mode !== 'create' && !existing) throw new HttpError(404, 'Configuration not found.');
+      if (mode !== 'create' && input.baseVersion !== existing.version) throw new HttpError(409, 'Configuration changed. Reload before saving.');
+      if (mode === 'create' && items.length >= MAX_CONFIGURATIONS) throw new HttpError(400, `At most ${MAX_CONFIGURATIONS} configurations are supported.`);
+      if (value?.enabled && (current.maintenance || current.authStatus !== 'linked')) throw new HttpError(409, 'Link WhatsApp and finish maintenance before enabling runs.');
+      if (mode === 'remove' && current.activeOperation) throw new HttpError(409, 'Wait for the active operation before removing a configuration.');
+      if (mode === 'remove' && (existing.queueCount || existing.pendingReportCount)) throw new HttpError(409, 'This configuration has pending work. Run it before removing it.');
+      const changes = value && { ...existing, ...value, id, version: (existing?.version || 0) + 1,
+        createdAt: existing?.createdAt || iso(), updatedAt: iso(), updatedBy: user,
+        ...(!existing || existing.enabled !== value.enabled || existing.timezone !== value.timezone
+          || existing.settings.period !== value.settings.period ? { scheduleStartedAt: iso(), lastScheduledSlot: null } : {}) };
+      const configurations = mode === 'create' ? [...items, changes]
+        : mode === 'remove' ? items.filter((item) => item.id !== id) : items.map((item) => item.id === id ? changes : item);
+      const next = { ...withConfigurations(current, configurations), updatedAt: iso(), updatedBy: user };
+      tx.create(ref.collection('versions').doc(String(next.activeVersion)), { ...configurationSnapshot(next), createdAt: iso(), createdBy: user });
+      tx.set(ref, next);
+    });
+    await reconcile();
+    return { id, ...(await overview()) };
   }
   async function refreshOperation(id) {
     if (!id) return null;
@@ -84,9 +123,10 @@ export function createControl({ db, env, google }) {
     } catch { /* Keep the durable state on transient monitoring API errors. */ }
     return (await opRef(id).get()).data();
   }
-  async function start(mode, key, user) {
+  async function start(mode, key, user, selection) {
     if (!['summary', 'pair'].includes(mode) || typeof key !== 'string' || !/^[\w-]{8,100}$/.test(key)) throw new HttpError(400, 'A valid idempotency key is required.');
-    const id = operationId(user, mode, key);
+    if (selection !== undefined && selection !== 'all') configurationId(selection);
+    const id = operationId(user, selection ? `${mode}:${selection}` : mode, key);
     const existing = (await opRef(id).get()).data();
     if (existing) return { id, status: existing.status };
     const latest = await config();
@@ -97,10 +137,21 @@ export function createControl({ db, env, google }) {
       const current = cfg.activeOperation ? (await tx.get(opRef(cfg.activeOperation))).data() : null;
       if (old) return { fresh: false, cfg, record: old };
       if (activeOperation(current)) throw new HttpError(409, 'Another operation is active. Wait for it to finish.');
-      if (mode === 'summary' && (!cfg.enabled || cfg.maintenance || cfg.authStatus !== 'linked' || cfg.scheduleStatus !== 'applied')) throw new HttpError(409, 'Enable a linked account with an applied schedule before running.');
+      if (mode === 'summary' && ((!selection && !cfg.enabled) || cfg.maintenance || cfg.authStatus !== 'linked'
+        || cfg.scheduleStatus !== 'applied' || cfg.appliedScheduleRevision !== cfg.scheduleRevision)) throw new HttpError(409, 'Use a linked device with an applied schedule before running.');
+      const configurations = configurationsOf(cfg);
+      const selected = selection === 'all' ? configurations : configurations.filter((item) => item.id === selection);
+      if (mode === 'summary' && selection && !selected.length) throw new HttpError(404, 'Configuration not found.');
       const changes = mode === 'pair' ? { enabled: false, maintenance: true,
         scheduleRevision: cfg.scheduleRevision + 1, scheduleStatus: 'pending', latestPairing: id } : {};
-      const record = { id, mode, owner: user, status: 'queued', createdAt: iso(), updatedAt: iso(), qr: null };
+      if (mode === 'pair' && cfg.configurations) {
+        changes.configurations = configurations.map((item) => ({ ...item, enabled: false, version: item.version + 1 }));
+        changes.activeVersion = cfg.activeVersion + 1;
+        tx.create(ref.collection('versions').doc(String(changes.activeVersion)), {
+          ...configurationSnapshot({ ...cfg, ...changes }), createdAt: iso(), createdBy: user });
+      }
+      const record = { id, mode, owner: user, status: 'queued', createdAt: iso(), updatedAt: iso(), qr: null,
+        ...(selection ? { configurationIds: selected.map((item) => item.id), configVersion: cfg.activeVersion } : {}) };
       tx.create(opRef(id), record);
       tx.update(ref, { ...changes, activeOperation: id });
       return { fresh: true, cfg: { ...cfg, ...changes }, record };
@@ -109,7 +160,8 @@ export function createControl({ db, env, google }) {
     try {
       if (mode === 'pair') await reconcile();
       const launched = await google.start(mode, { CONFIG_ID: env.configId, REQUEST_ID: id,
-        SCHEDULE_REVISION: result.cfg.scheduleRevision });
+        SCHEDULE_REVISION: result.cfg.scheduleRevision,
+        CONFIGURATION_IDS: result.record.configurationIds?.join(',') || '' });
       await opRef(id).set(launched, { merge: true });
     } catch (error) {
       // An ambiguous HTTP result could have started a worker. Do not auto-start
@@ -146,9 +198,18 @@ export function createControl({ db, env, google }) {
     await refreshOperation(cfg.activeOperation);
     const latest = await config();
     const recent = await ref.collection('operations').orderBy('createdAt', 'desc').limit(12).get();
-    return { config: latest, nextRunAt: nextRunAt(latest), operations: recent.docs.map((d) => {
+    const configurations = configurationsOf(latest).map((item) => {
+      const next = nextRunAt({ ...item, maintenance: latest.maintenance,
+        scheduleStatus: latest.appliedScheduleRevision === latest.scheduleRevision ? latest.scheduleStatus : 'pending' });
+      return { ...item, nextRunAt: next && latest.configurations
+        ? new Date(Math.ceil(Date.parse(next) / 1800000) * 1800000).toISOString() : next };
+    });
+    return { config: latest, configurations, nextRunAt: configurations.map((item) => item.nextRunAt).filter(Boolean).sort()[0] || null, operations: recent.docs.map((d) => {
       const { qr, ...safe } = d.data(); return safe;
     }) };
   }
-  return { ref, opRef, config, update, reconcile, start, pairing, cancelPairing, overview, refreshOperation };
+  return { ref, opRef, config, update, reconcile, start, pairing, cancelPairing, overview, refreshOperation,
+    createConfiguration: (input, user) => changeConfiguration(null, input, user, 'create'),
+    updateConfiguration: (id, input, user) => changeConfiguration(id, input, user, 'update'),
+    removeConfiguration: (id, input, user) => changeConfiguration(id, input, user, 'remove') };
 }

@@ -149,7 +149,7 @@ node --env-file=.env.gcp scripts/seed-secret.js
 
 This checks that Gemini accepts the key before uploading it. New summary
 executions use the latest secret version. The admin and pairing Job never receive
-the key. Select an available model in Settings; model availability and quotas
+the key. Select an available model in Configurations; model availability and quotas
 depend on the key's project.
 
 ## Link WhatsApp and enable runs
@@ -164,28 +164,50 @@ depend on the key's project.
    synchronization window. Pairing creates no summaries and sends no reports;
    saved messages remain queued for the next summary run. Scheduling stays paused.
    Re-linking preserves queued work.
-5. Check settings and recipients, enable the account, then select **Run now**.
-   Run now uses the same worker and requires an enabled account. Observe a
-   successful report, then pause again for controlled offline tests.
+5. Open **Configurations**, check each configuration and its recipients, and
+   select its **Run now** button. Manual runs work with scheduling paused.
+   **Run all** processes every saved configuration in one Job. Observe a
+   successful report, then enable the desired configurations after offline tests.
 6. Verify expected message IDs after one and four hours offline, including group
    messages and captions. Compare them with the source device and inspect report
    delivery. A completed Job or a FULL sync event alone does not prove completeness.
-7. Enable the four-hour schedule after validation. Change to hourly only after
-   measuring synchronization time, usage, and quota headroom.
+7. Enable scheduled runs on the desired configurations after validation. Start
+   with four hours; measure synchronization time, usage, and quota headroom
+   before choosing hourly runs.
 
 The device connection page is available at `/#device-connection` on the admin URL
 printed by deployment.
 Existing `/#whatsapp` links automatically switch to the new anchor.
 
-Settings and Overview show whether scheduled runs are enabled or paused. Pending
-or failed updates are shown separately; `applied` only confirms that settings
-were reconciled, including a pause. Changing the enable checkbox requires
-**Save settings**, and the status text explains any unsaved enable/pause change.
+The configuration list is available at `/#configurations`; use
+`/#configurations/ID` to open a specific item. Existing `/#settings` links
+redirect to the list. Cards expand and collapse without losing unsaved edits.
+Save changes with **Save configuration**; **Reload** discards local edits and
+loads the current version. Overview links to the list and shows recent outcomes.
+Run now is available on each card, and Run all is at the top of the list.
+
+Each named configuration has independent filters, recipients, model, instructions,
+quiet time, time zone, and scheduling state. All share one linked device. Manual
+runs include paused schedules; scheduled runs select only enabled configurations
+that are due. The same WhatsApp connection collects input into separate queues
+for every saved configuration. Pausing stops automatic reports and preserves
+pending input. Removal requires no active operation and no pending work.
+
+A shared Scheduler checks due configurations every 30 minutes in UTC and pauses
+when all schedules are disabled. Each configuration retains its own local
+30-minute, hourly, or four-hour boundaries. Time zones with quarter-hour offsets
+can wait until the next shared tick. The worker saves completed schedule slots
+and processes Run all sequentially under one account lease. A failed configuration
+does not prevent other selected configurations from completing.
+
+Pending or failed schedule updates are shown separately from enabled/paused state.
+Use **Retry schedule update** to reconcile saved changes. Pairing pauses every
+configuration; enable the desired schedules again after linking.
 
 A successful execution can have nothing to send. Recent run details distinguish
 reports sent, messages waiting for the configured quiet time, and no matching
 messages. They also flag receive/sync errors. If a report is missing, compare the
-collection counters and full chat names with **Settings → Chat filters** before
+collection counters and full chat names with **Configurations → Chat filters** before
 changing recipients or the Gemini key. An empty filter includes every chat.
 
 Reports are delivered at least once. A crash between a confirmed WhatsApp send
@@ -241,8 +263,14 @@ gcloud run jobs execute whatsapp-summary --project=PROJECT_ID --region=REGION --
 gcloud scheduler jobs describe whatsapp-summary --project=PROJECT_ID --location=REGION
 ```
 
-Settings are versioned under `configs/whatsapp-main/versions`; runs retain their
-version and saved reports retain their original recipients. An expired lease can
+Configuration snapshots are versioned under `configs/ACCOUNT_ID/versions`;
+manual requests pin their snapshot and each item has its own edit version.
+Saved reports retain their original recipients. Existing settings appear as
+**Default configuration** and keep the original runtime queue. New queues use
+`accounts/ACCOUNT_ID/configurations/ID`; auth and the lease stay account-wide.
+The first configuration change materializes the list and switches to shared
+scheduled dispatch. Update both Jobs and the admin image before making that
+change; no additional Jobs, Scheduler resources, or IAM grants are required. An expired lease can
 be acquired by a new execution, but fenced writes reject the previous owner.
 Workers renew every 15 seconds with a 60-second lease. The summary deadline is
 570 seconds; pairing is 270 seconds, leaving time for cleanup before platform

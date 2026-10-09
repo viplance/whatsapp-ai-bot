@@ -83,6 +83,12 @@ Cloud mode uses a scheduled summary Job, a temporary pairing Job, and an
 IAP-protected admin UI. Firestore stores configuration, session keys, and queued
 work; Secret Manager holds the Gemini key. Local continuous mode stays available.
 
+The admin's **Configurations** page supports named, expandable configurations
+with independent filters, recipients, and schedules. Run now is on each item;
+Run all processes every saved configuration, including paused schedules, using
+the shared linked device. Existing settings become **Default configuration**.
+Use `#configurations` or `#configurations/ID`; old `#settings` links redirect.
+
 Follow the [CLI deployment guide](docs/gcp-deployment.md). See
 [ADR-0001: Scheduled execution on GCP](docs/adr/0001-gcp-scheduled-execution.md)
 for the architecture, schedule semantics, and cost estimates.

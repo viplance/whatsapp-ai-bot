@@ -8,22 +8,29 @@ import { rememberContact, rememberGroup } from './store.js';
 export class NeedsPairingError extends Error { constructor() { super('WhatsApp authorization needs pairing'); } }
 
 // No scan interval or background reconnect loop: the caller owns the deadline.
-export function connectSession({ auth, config, store, signal, pairing = false,
+export function connectSession({ auth, config, store, collectionTargets, signal, pairing = false,
   onQr = async () => {}, socketFactory = makeWASocket,
   getVersion = fetchLatestWaWebVersion, syncWaitMs = 75000, onDiagnostic = () => {} }) {
   const controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
   let socket, version, closed = false, opened = false, retries = 0, tail = Promise.resolve(), failure;
   const historyStart = new Date();
-  const historySince = store?.getHistorySince();
-  const filters = createFilters(config.filters);
+  const targets = (collectionTargets || [{ config, store }]).filter((target) => target.store)
+    .map((target) => ({ ...target, historySince: target.store.getHistorySince(), filters: createFilters(target.config.filters), counts: {} }));
   const metrics = { received: 0, withoutText: 0, ownReports: 0, outsideWindow: 0,
     filtered: 0, unresolvedGroups: 0, matched: 0, added: 0, duplicates: 0,
     historyEvents: 0, historyComplete: false, decryptionErrors: 0, messageErrors: 0,
     historyNotifications: 0, appStateErrors: 0 };
-  const ingest = store && createIngestor({ store, filters, onResult: (result) => {
-    for (const [key, value] of Object.entries(result)) metrics[key] += value;
+  for (const target of targets) target.ingest = createIngestor({ store: target.store, filters: target.filters, onResult: (result) => {
+    for (const [key, value] of Object.entries(result)) {
+      metrics[key] += value;
+      target.counts[key] = (target.counts[key] || 0) + value;
+    }
   } });
+  const ingest = async (messages, { sock, history = false }) => {
+    for (const target of targets) await target.ingest(messages, { sock, signal: combined,
+      ...(history ? { historySince: target.historySince } : {}) });
+  };
   const logger = createSessionLogger((event) => {
     const counter = { whatsapp_decryption_failed: 'decryptionErrors', whatsapp_message_failed: 'messageErrors',
       whatsapp_history_notification: 'historyNotifications', whatsapp_app_state_sync_failed: 'appStateErrors' }[event.event];
@@ -85,14 +92,13 @@ export function connectSession({ auth, config, store, signal, pairing = false,
         void sleep(1000, undefined, { signal: combined }).then(connect).catch((error) => { if (!closed) fail(error); });
       }
     });
-    if (!store) return;
+    if (!targets.length) return;
     sock.ev.on('contacts.upsert', (contacts) => { if (current()) contacts.forEach(rememberContact); });
     sock.ev.on('contacts.update', (contacts) => { if (current()) contacts.forEach(rememberContact); });
     sock.ev.on('groups.update', (groups) => { if (current()) groups.forEach((g) => rememberGroup(g.id, g.subject)); });
     sock.ev.on('messages.upsert', (event) => {
       if (!current() || !['notify', 'append'].includes(event.type)) return;
-      void enqueue(() => ingest(event.messages, { sock, signal: combined,
-        ...(event.type === 'append' ? { historySince } : {}) }));
+      void enqueue(() => ingest(event.messages, { sock, history: event.type === 'append' }));
     });
     sock.ev.on('messaging-history.set', (event) => {
       if (!current()) return;
@@ -100,9 +106,9 @@ export function connectSession({ auth, config, store, signal, pairing = false,
       void enqueue(async () => {
         for (const contact of event.contacts || []) rememberContact(contact);
         for (const chat of event.chats || []) if (chat.name) rememberGroup(chat.id, chat.name);
-        await ingest(event.messages, { sock, historySince, signal: combined });
+        await ingest(event.messages, { sock, history: true });
         if (event.syncType === proto.HistorySync.HistorySyncType.FULL && event.progress === 100 && !failure) {
-          await store.completeHistory(historyStart);
+          for (const target of targets) await target.store.completeHistory(historyStart);
           metrics.historyComplete = true;
           historyResolve();
         }
@@ -126,19 +132,19 @@ export function connectSession({ auth, config, store, signal, pairing = false,
     async collect() {
       const timeout = new AbortController();
       try {
-        if (filters.active && socket?.groupFetchAllParticipating) {
+        if (targets.some((target) => target.filters.active) && socket?.groupFetchAllParticipating) {
           try {
             const groups = Object.values(await socket.groupFetchAllParticipating());
             for (const group of groups) rememberGroup(group.id, group.subject);
             metrics.groups = groups.length;
-            metrics.matchingGroups = groups.filter((group) => filters.matches(group.subject)).length;
+            metrics.matchingGroups = groups.filter((group) => targets.some((target) => target.filters.matches(group.subject))).length;
           } catch { onDiagnostic({ event: 'whatsapp_group_metadata_failed' }); }
         }
         await Promise.race([history, sleep(syncWaitMs, undefined, { signal: AbortSignal.any([combined, timeout.signal]) })]);
         await tail;
         combined.throwIfAborted();
         onDiagnostic({ event: 'whatsapp_collection_finished', ...metrics });
-        return { ...metrics };
+        return { ...metrics, ...(collectionTargets ? { configurations: Object.fromEntries(targets.map((target) => [target.id, { ...target.counts, historyComplete: metrics.historyComplete }])) } : {}) };
       } finally { timeout.abort(); }
     },
     async stop() {
@@ -146,7 +152,7 @@ export function connectSession({ auth, config, store, signal, pairing = false,
       socket?.end?.(new Error('Finite run completed'));
       await tail;
       await auth.flush?.();
-      await store?.flush?.();
+      for (const target of targets) await target.store.flush?.();
       controller.abort(new Error('Finite run completed'));
       if (failure) throw failure;
     },

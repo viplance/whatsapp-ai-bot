@@ -4,8 +4,9 @@ export const documentId = (id) => createHash('sha256').update(id).digest('hex');
 const copy = (value) => structuredClone(value);
 const dateValid = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 
-export async function createFirestoreState({ db, configId, lease, defaultLookbackMs, now = Date.now }) {
-  const root = db.doc(`accounts/${configId}`);
+export async function createFirestoreState({ db, configId, configurationId, lease, defaultLookbackMs, now = Date.now }) {
+  // The migrated default retains the old queue and delivery acknowledgements.
+  const root = db.doc(`accounts/${configId}${configurationId && configurationId !== 'default' ? `/configurations/${configurationId}` : ''}`);
   const [meta, messages, reports, seen] = await Promise.all([
     root.get(), root.collection('messages').get(), root.collection('reports').get(), root.collection('seen').get(),
   ]);

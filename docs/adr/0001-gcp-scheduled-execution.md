@@ -1,16 +1,17 @@
 # ADR-0001: Scheduled execution of the WhatsApp bot on GCP
 
 **Date:** 2026-10-07 · **Status:** Implemented; production validation pending.
-**Updated:** 2026-10-08 — cloud workers, browser administration, and deployment.
+**Updated:** 2026-10-09 — multiple configurations and shared scheduled dispatch.
 
 ## Decision
 
-Run the bot as a **Cloud Run Job triggered by Cloud Scheduler**, initially every
-four hours. Each run connects to WhatsApp, collects messages, sends summaries,
-and exits. Consider hourly runs after measuring synchronization time and costs.
+Run the bot as a **Cloud Run Job triggered by Cloud Scheduler**. A shared
+Scheduler checks due configurations every 30 minutes; each configuration chooses
+30 minutes, one hour, or four hours in its own time zone. Each run connects once
+to WhatsApp, collects messages, sends eligible summaries, and exits.
 
-A small **admin UI and API on Cloud Run** manages settings, device pairing, and
-runs. It stores settings in Firestore and updates Scheduler when `period` changes.
+A small **admin UI and API on Cloud Run** manages configurations, device pairing,
+and runs. It stores versioned configurations in Firestore and reconciles Scheduler.
 Bot Jobs store the WhatsApp session and processing state in Firestore;
 Secret Manager holds the Gemini key. A separate, temporary pairing Job uses the
 same bot image to link the device from the browser.
@@ -76,8 +77,8 @@ administrators, with three views:
 
 | View | What the administrator can do |
 | --- | --- |
-| Overview | See whether the device is linked, the next scheduled run, recent outcomes, queue age, and actionable errors. Run now when enabled and not pairing. |
-| Settings | Edit the [existing bot settings](../../config.json.example), time zone, and enabled state. See when a schedule change is pending or failed, and retry it. |
+| Overview | See the linked device, configuration count, next scheduled run, recent outcomes, queue age, and errors. |
+| Configurations | Add, remove, expand, or collapse named configurations. Each has its own [bot settings](../../config.json.example), time zone, schedule, and Run now button. Run all launches every saved configuration, including paused ones, in one Job. |
 | Device connection | Link or re-link a device, scan the current QR code, cancel pairing, and see success, expiry, or failure. |
 
 Between scheduled runs, a closed WhatsApp connection is expected. Show **Linked**
@@ -101,6 +102,9 @@ lock. API responses expose operation IDs and sanitized status, not GCP tokens.
 Grant the API read/cancel access to the two Job definitions; reconcile stale UI
 status with Cloud Run execution state if a worker terminates before reporting.
 Keep raw logs in Cloud Logging and Gemini secrets in deployment configuration.
+Use `#configurations` for the list and `#configurations/ID` for an expanded item.
+Redirect existing `#settings` links to the list. All configurations share one
+linked device and account lock, with independent queues and delivery progress.
 
 ## Pairing from the browser
 
@@ -151,16 +155,17 @@ trusted control-plane identities with indirect worker privileges. For a stronger
 boundary, add a fixed-argument launcher and remove their override permission.
 The browser API accepts no arbitrary Job arguments or environment variables.
 
-## Settings and scheduling
+## Configurations and scheduling
 
 Firestore is the source of truth. The configuration service validates settings,
-saves immutable versions, and updates Scheduler. Pass only `configId` and the
-schedule revision through
+saves immutable versions, and updates Scheduler. Pass the account ID, schedule
+revision, request ID, and configuration selection through
 [execution overrides](https://docs.cloud.google.com/run/docs/execute/jobs#override_job_configuration_for_a_specific_execution);
 the worker loads settings at startup. Changes take effect on the next run without
 redeploying the container.
 
-Keep `period` as the single frequency setting:
+Keep `period` as each configuration's frequency setting. These expressions
+describe local due times, rather than separate Scheduler jobs:
 
 | `period` | Scheduler cron | Run times |
 | --- | --- | --- |
@@ -169,18 +174,29 @@ Keep `period` as the single frequency setting:
 | `4h` | `0 */4 * * *` | 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 |
 
 Use an explicit time zone, initially `Europe/Istanbul`. These are clock-based
-start times, not intervals after a run finishes. Initially accept only the listed
+due times, not intervals after a run finishes. Accept only the listed
 durations after normalization; reject unsupported values such as `90min`.
-Local continuous mode keeps its existing interval behavior.
+Local continuous mode keeps its existing interval behavior. The single Scheduler
+runs at `*/30 * * * *` in UTC and pauses when no configuration is enabled.
+The worker remembers each successfully processed schedule slot; delayed starts
+still identify due work. Time zones with quarter-hour offsets may wait until the
+next shared tick. Manual runs also work with scheduling paused.
 
 Firestore and Scheduler cannot be updated atomically. Track desired and applied
 schedule revisions, expose `pending`/`error`, and provide an idempotent protected
 `reconcile` endpoint to retry incomplete changes. Workers skip stale revisions
-and disabled configurations. `enabled=false` pauses future runs; cancelling an
-active run is a separate action.
+and select only enabled, due configurations for scheduled runs. Pausing stops
+automatic summaries; a connection collects matching input for every saved
+configuration, preserving it in separate queues. Cancelling an active run is
+a separate action. One failed configuration preserves its work while other
+selected configurations can finish.
 
 Existing reports retain their original recipients and settings version.
 Configuration changes must preserve queued work; replaying history is explicit.
+Existing settings appear as **Default configuration**, retaining the old runtime
+queue and acknowledgements. New configurations use separate runtime namespaces.
+Removal is refused during an active operation or while a configuration has
+pending work. Up to 20 configurations are supported.
 `waitForNoActivity` checks the newest message in each chat. Active chats wait
 until a later run, rather than keeping the Job alive.
 

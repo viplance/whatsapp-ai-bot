@@ -36,6 +36,7 @@ export function createGoogleApi({ env, auth = new GoogleAuth({ scopes: ['https:/
           body: Buffer.from(JSON.stringify({ overrides: { containerOverrides: [{ env: [
             { name: 'CONFIG_ID', value: env.configId }, { name: 'SCHEDULE_REVISION', value: String(config.scheduleRevision) },
             { name: 'REQUEST_ID', value: '' },
+            { name: 'CONFIGURATION_IDS', value: '' },
           ] }] } })).toString('base64') } };
       const base = 'https://cloudscheduler.googleapis.com/v1/';
       try {

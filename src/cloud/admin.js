@@ -43,6 +43,7 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
       if (request.method === 'GET') {
         if (path === '/api/session') return json(200, { email: identity.email, csrf: identity.csrf });
         if (path === '/api/overview') return json(200, await control.overview());
+        if (path === '/api/configurations') return json(200, await control.overview());
         if (path === '/api/pairing') {
           const value = await control.pairing(identity.email);
           if (value?.qr) { value.qrDataUrl = await QRCode.toDataURL(value.qr, { width: 300, margin: 2 }); delete value.qr; }
@@ -50,9 +51,15 @@ export function createAdminServer({ env, control, authenticate = createAdminAuth
         }
         throw new HttpError(404, 'Not found.');
       }
-      if (!['POST', 'PUT'].includes(request.method)) throw new HttpError(405, 'Method not allowed.');
+      if (!['POST', 'PUT', 'DELETE'].includes(request.method)) throw new HttpError(405, 'Method not allowed.');
       checkMutation(request, identity);
       const body = await readBody(request);
+      const item = path.match(/^\/api\/configurations\/([a-z0-9-]{1,60})(\/run)?$/);
+      if (path === '/api/configurations' && request.method === 'POST') return json(201, await control.createConfiguration(body, identity.email));
+      if (path === '/api/configurations/run-all' && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, identity.email, 'all'));
+      if (item && item[2] && request.method === 'POST') return json(202, await control.start('summary', body.idempotencyKey, identity.email, item[1]));
+      if (item && !item[2] && request.method === 'PUT') return json(200, await control.updateConfiguration(item[1], body, identity.email));
+      if (item && !item[2] && request.method === 'DELETE') return json(200, await control.removeConfiguration(item[1], body, identity.email));
       if (path === '/api/settings' && request.method === 'PUT') return json(200, await control.update(body, identity.email));
       if (request.method === 'POST') {
         if (path === '/api/reconcile') { await control.reconcile(); return json(200, { applied: true }); }
