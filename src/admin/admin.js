@@ -3,7 +3,7 @@ let identity, current, configurations = [], operations = [], devices = [], selec
 const editors = new Map();
 const when = (date) => date ? new Date(date).toLocaleString() : '—';
 const active = (record) => ['queued', 'running', 'cancelling'].includes(record?.status);
-const periodLabel = (period) => ({ '30min': '30 minutes', '1h': '1 hour', '4h': '4 hours' }[period] || period);
+const periodLabel = (period) => ({ '15min': '15 minutes', '30min': '30 minutes', '1h': '1 hour', '4h': '4 hours', '8h': '8 hours', '24h': '24 hours' }[period] || period);
 const scheduleApplied = (record = current) => record?.scheduleStatus === 'applied' && record.appliedScheduleRevision === record.scheduleRevision;
 const profileDevice = (profile) => identity?.devicesEnabled ? devices.find((device) => device.id === profile.deviceId) : current;
 const selectedDevice = () => identity?.devicesEnabled ? devices.find((device) => device.id === selectedDeviceId) : current;

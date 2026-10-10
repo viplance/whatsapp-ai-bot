@@ -8,8 +8,13 @@ export const SETTINGS_KEYS = ['period', 'waitForNoActivity', 'filters', 'phones'
   'systemInstruction', 'summaryConcurrency', 'defaultLookbackHours', 'showScanLogs'];
 
 export function scheduleFor(period) {
-  const cron = { 1800000: '*/30 * * * *', 3600000: '0 * * * *', 14400000: '0 */4 * * *' }[parsePeriodMs(period)];
-  if (!cron) throw new HttpError(400, 'Cloud schedules support 30min, 1h, or 4h.');
+  const ms = parsePeriodMs(period);
+  if (ms < 900000 || ms > 86400000) {
+    throw new HttpError(400, 'Schedule interval must be between 15 minutes and 24 hours.');
+  }
+  const cron = { 900000: '*/15 * * * *', 1800000: '*/30 * * * *', 3600000: '0 * * * *',
+    14400000: '0 */4 * * *', 28800000: '0 */8 * * *', 86400000: '0 0 * * *' }[ms];
+  if (!cron) throw new HttpError(400, 'Cloud schedules support 15min, 30min, 1h, 4h, 8h, or 24h.');
   return cron;
 }
 
@@ -39,8 +44,8 @@ export function nextRunAt(settings, now = new Date()) {
     const parts = format.formatToParts(time);
     const hour = Number(parts.find((p) => p.type === 'hour').value);
     const minute = Number(parts.find((p) => p.type === 'minute').value);
-    if ((ms === 1800000 && minute % 30 === 0) || (ms === 3600000 && minute === 0)
-      || (ms === 14400000 && minute === 0 && hour % 4 === 0)) return new Date(time).toISOString();
+    if ((ms < 3600000 && minute % (ms / 60000) === 0)
+      || (ms >= 3600000 && minute === 0 && hour % (ms / 3600000) === 0)) return new Date(time).toISOString();
   }
   return null;
 }

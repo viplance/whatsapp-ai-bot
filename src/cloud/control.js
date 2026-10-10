@@ -213,7 +213,7 @@ export function createControl({ db, env, google }) {
       const next = nextRunAt({ ...item, maintenance: latest.maintenance,
         scheduleStatus: latest.appliedScheduleRevision === latest.scheduleRevision ? latest.scheduleStatus : 'pending' });
       return { ...item, nextRunAt: next && latest.configurations
-        ? new Date(Math.ceil(Date.parse(next) / 1800000) * 1800000).toISOString() : next };
+        ? new Date(Math.ceil(Date.parse(next) / 900000) * 900000).toISOString() : next };
     });
     return { config: latest, configurations, nextRunAt: configurations.map((item) => item.nextRunAt).filter(Boolean).sort()[0] || null, operations: recent.docs.map((d) => {
       const { qr, ...safe } = d.data(); return safe;

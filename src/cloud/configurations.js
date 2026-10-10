@@ -3,7 +3,7 @@ import { parsePeriodMs } from '../config-values.js';
 
 export const DEFAULT_CONFIGURATION_ID = 'default';
 export const MAX_CONFIGURATIONS = 20;
-const canonicalPeriod = (period) => ({ 1800000: '30min', 3600000: '1h', 14400000: '4h' }[parsePeriodMs(period)] || period);
+const canonicalPeriod = (period) => ({ 900000: '15min', 1800000: '30min', 3600000: '1h', 14400000: '4h', 28800000: '8h', 86400000: '24h' }[parsePeriodMs(period)] || period);
 export function configurationId(id) {
   if (typeof id !== 'string' || !/^[a-z0-9-]{1,60}$/.test(id)) throw new HttpError(400, 'Invalid configuration ID.');
   return id;
@@ -32,7 +32,7 @@ export function validateConfiguration(input) {
 export function withConfigurations(account, configurations) {
   return { ...account, configurations, enabled: configurations.some((item) => item.enabled),
     // One shared Scheduler dispatches configurations using their own local times.
-    settings: { ...account.settings, period: '30min' }, timezone: 'UTC',
+    settings: { ...account.settings, period: '15min' }, timezone: 'UTC',
     activeVersion: account.activeVersion + 1, scheduleRevision: account.scheduleRevision + 1,
     scheduleStatus: 'pending' };
 }
@@ -46,15 +46,15 @@ export function configurationSnapshot(account) {
 export function lastScheduleSlot(configuration, now = new Date()) {
   // Locate a local wall-clock boundary even when the shared Job starts late.
   const period = parsePeriodMs(configuration.settings.period) / 60000;
-  if (![30, 60, 240].includes(period)) return null;
+  if (![15, 30, 60, 240, 480, 1440].includes(period)) return null;
   const format = new Intl.DateTimeFormat('en-GB', { timeZone: configuration.timezone,
     hourCycle: 'h23', hour: '2-digit', minute: '2-digit' });
   for (let time = Math.floor(now.getTime() / 60000) * 60000; time >= now.getTime() - 48 * 3600000; time -= 60000) {
     const parts = format.formatToParts(time);
     const hour = Number(parts.find((part) => part.type === 'hour').value);
     const minute = Number(parts.find((part) => part.type === 'minute').value);
-    if ((period === 30 && minute % 30 === 0) || (period === 60 && minute === 0)
-      || (period === 240 && minute === 0 && hour % 4 === 0)) return new Date(time).toISOString();
+    if ((period < 60 && minute % period === 0)
+      || (period >= 60 && minute === 0 && hour % (period / 60) === 0)) return new Date(time).toISOString();
   }
   return null;
 }

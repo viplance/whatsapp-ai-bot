@@ -42,7 +42,7 @@ export async function workspaceCli(args = process.argv.slice(2), variables = pro
       'deploy-shared': ['Enable required APIs; create registry database and shared service accounts.',
         'Grant database-scoped registry access; create an HMAC secret readable only by the registry service.',
         'Deploy private registry service and fixed dispatcher Job; register the service URL.',
-        'Create a 30-minute UTC Scheduler trigger, initially paused; preserve an existing trigger state.'],
+        'Create a 15-minute UTC Scheduler trigger, initially paused; preserve an existing trigger state.'],
       provision: ['Register explicit owner membership with access closed during provisioning.',
         'Create a workspace Gemini secret; grant access only to its summary worker.',
         'Execute the database and fixed-Job commands below; register workload identities.',
@@ -134,7 +134,7 @@ export async function workspaceCli(args = process.argv.slice(2), variables = pro
         '--command=node', '--args=src/cloud/dispatcher.js', `--set-env-vars=${sharedEnv}`, '--cpu=1', '--memory=512Mi', '--tasks=1', '--parallelism=1', '--task-timeout=600s', '--max-retries=1', '--clear-secrets', '--quiet']);
       gcloud(['run', 'jobs', 'add-iam-policy-binding', 'whatsapp-dispatcher', project, region, `--member=serviceAccount:${email('whatsapp-clock')}`, '--role=roles/run.invoker', '--quiet']);
       const hasClock = exists(['scheduler', 'jobs', 'describe', 'whatsapp-dispatch', project, `--location=${env.region}`]);
-      gcloud(['scheduler', 'jobs', hasClock ? 'update' : 'create', 'http', 'whatsapp-dispatch', project, `--location=${env.region}`, '--schedule=*/30 * * * *', '--time-zone=UTC',
+      gcloud(['scheduler', 'jobs', hasClock ? 'update' : 'create', 'http', 'whatsapp-dispatch', project, `--location=${env.region}`, '--schedule=*/15 * * * *', '--time-zone=UTC',
         `--uri=https://run.googleapis.com/v2/projects/${env.projectId}/locations/${env.region}/jobs/whatsapp-dispatcher:run`, '--http-method=POST',
         '--headers=Content-Type=application/json', '--message-body={}', `--oauth-service-account-email=${email('whatsapp-clock')}`, '--quiet']);
       if (!hasClock) gcloud(['scheduler', 'jobs', 'pause', 'whatsapp-dispatch', project, `--location=${env.region}`, '--quiet']);

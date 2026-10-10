@@ -126,6 +126,28 @@ test('imported filename-normalized keys resolve original IDs and cannot reappear
   assert.deepEqual(await imported.state.keys.get('session', ['123:4/5']), {});
 });
 
+test('new schedule intervals validate and calculate the next run in the configured timezone', () => {
+  for (const [period, cron, next] of [
+    ['15min', '*/15 * * * *', '2026-10-08T00:15:00.000Z'],
+    ['8h', '0 */8 * * *', '2026-10-08T05:00:00.000Z'],
+    ['24h', '0 0 * * *', '2026-10-08T21:00:00.000Z'],
+  ]) {
+    const config = validateSettings({ enabled: true, timezone: 'Europe/Istanbul', settings: { period } });
+    assert.equal(scheduleFor(period), cron);
+    assert.equal(nextRunAt({ ...config, scheduleStatus: 'applied' }, new Date('2026-10-08T00:01:00Z')), next);
+  }
+});
+
+test('server settings reject out-of-range intervals and invalid formats', () => {
+  for (const period of ['14min', '25h', '0', '-15min', '15 minutes', '1h garbage', '', null, {}, Infinity]) {
+    assert.throws(() => validateSettings({ enabled: true, timezone: 'UTC', settings: { period } }),
+      (error) => error instanceof HttpError && error.status === 400);
+  }
+  for (const period of ['14min', '25h']) {
+    assert.throws(() => scheduleFor(period), /between 15 minutes and 24 hours/);
+  }
+});
+
 test('settings reject unsupported schedules and stale versions', async () => {
   const { control, cfg } = await fixture();
   assert.equal(scheduleFor('240min'), '0 */4 * * *');

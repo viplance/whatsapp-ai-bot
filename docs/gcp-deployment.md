@@ -197,10 +197,9 @@ that are due. The same WhatsApp connection collects input into separate queues
 for every saved configuration. Pausing stops automatic reports and preserves
 pending input. Removal requires no active operation and no pending work.
 
-A shared Scheduler checks due configurations every 30 minutes in UTC and pauses
+A shared Scheduler checks due configurations every 15 minutes in UTC and pauses
 when all schedules are disabled. Each configuration retains its own local
-30-minute, hourly, or four-hour boundaries. Time zones with quarter-hour offsets
-can wait until the next shared tick. The worker saves completed schedule slots
+15-minute, 30-minute, hourly, four-hour, eight-hour, or daily boundaries. The worker saves completed schedule slots
 and processes Run all sequentially under one account lease. A failed configuration
 does not prevent other selected configurations from completing.
 

@@ -77,7 +77,7 @@ test('configuration CRUD preserves sibling settings and checks individual versio
   const f = await fixture(true);
   const added = await f.control.createConfiguration(f.input, user);
   const cfg = await f.control.config();
-  assert.equal(cfg.settings.period, '30min');
+  assert.equal(cfg.settings.period, '15min');
   assert.equal(cfg.timezone, 'UTC');
   assert.equal(added.configurations[0].settings.period, '1h');
   assert.equal(added.configurations[1].settings.period, '4h');
@@ -198,6 +198,19 @@ test('dispatch respects each local schedule, delayed starts, and already complet
   istanbul.lastScheduledSlot = '2026-10-09T01:00:00Z';
   assert.deepEqual(dueConfigurations(account, new Date('2026-10-09T01:32:00Z')), []);
   assert.equal(lastScheduleSlot(profile('quarter-offset', '1h', 'Asia/Kathmandu'), now), '2026-10-09T00:15:00.000Z');
+});
+
+test('new intervals dispatch at local boundaries and do not repeat completed slots', () => {
+  const now = new Date('2026-10-09T21:17:00Z');
+  for (const period of ['15min', '8h', '24h']) {
+    const profile = { id: period, enabled: true, timezone: 'Europe/Istanbul', settings: { period },
+      scheduleStartedAt: '2026-10-09T20:00:00Z' };
+    const slot = period === '15min' ? '2026-10-09T21:15:00.000Z' : '2026-10-09T21:00:00.000Z';
+    assert.equal(lastScheduleSlot(profile, now), slot);
+    assert.equal(dueConfigurations({ configurations: [profile] }, now).length, 1);
+    profile.lastScheduledSlot = slot;
+    assert.deepEqual(dueConfigurations({ configurations: [profile] }, now), []);
+  }
 });
 
 test('scheduled workers run only due configurations and remember completed slots', async (t) => {

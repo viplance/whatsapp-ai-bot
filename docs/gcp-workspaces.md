@@ -11,7 +11,7 @@ cutover below are completed. This guide extends the
 | --- | --- |
 | Existing IAP-protected admin | Control and runtime Firestore databases |
 | Private account registry service and database | Summary and pairing Jobs, each with its own service account |
-| Dispatcher Job and one 30-minute UTC Scheduler trigger | A Gemini secret readable only by the summary worker |
+| Dispatcher Job and one 15-minute UTC Scheduler trigger | A Gemini secret readable only by the summary worker |
 
 The registry stores explicit membership using the verified IAP subject, resource
 names, dispatch hints and keyed account fingerprints. It contains no message

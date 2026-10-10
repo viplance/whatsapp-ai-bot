@@ -37,16 +37,16 @@
                 <label class="toggle"><input type="checkbox" name="enabled"> Enable scheduled runs</label>
                 <p class="muted">Run now also works when scheduling is paused. Saved changes apply to future runs.</p>
                 <div class="fields">
-                  <label>Run every<select name="period"><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option></select></label>
+                  <label>Run every<select name="period"><option value="15min">15 minutes</option><option value="30min">30 minutes</option><option value="1h">1 hour</option><option value="4h">4 hours</option><option value="8h">8 hours</option><option value="24h">24 hours</option></select></label>
                   <label>Time zone<input name="timezone" required placeholder="Europe/Istanbul"></label>
                   <label>Quiet time<input name="waitForNoActivity" required placeholder="15min"><small>Active chats wait until a later run.</small></label>
                   <label>Gemini model<input name="model" required placeholder="gemini-3.1-flash-lite"></label>
-                  <label>Concurrent summaries<input name="summaryConcurrency" type="number" min="1" max="10" required></label>
+                  <label>Chats processed at once<input name="summaryConcurrency" type="number" min="1" max="10" required></label>
                   <label>Initial history window, hours<input name="defaultLookbackHours" type="number" min="1" required></label>
                 </div>
                 <label>Chat filters<textarea name="filters" rows="3" placeholder="One name fragment per line; empty includes every chat"></textarea><small>Matches any part of a group or contact name, ignoring case, including Turkish I/İ/ı.</small></label>
                 <label>Report recipients<textarea name="phones" rows="3" required placeholder="One international number per line, or own"></textarea></label>
-                <label>Summary instructions<textarea name="systemInstruction" rows="6" maxlength="16000"></textarea></label>
+                <label>AI agent instructions<textarea name="systemInstruction" rows="6" maxlength="16000"></textarea></label>
                 <div class="actions"><button type="submit">Save configuration</button><button type="button" class="reload-configuration secondary">Reload</button><button type="button" class="reconcile-configuration secondary">Retry schedule update</button></div>
                 <p class="configuration-schedule muted" role="status"></p>
               </form>
